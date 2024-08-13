@@ -27,7 +27,7 @@ def get_sqlalchemy_engine():
     password = quote_plus(db_config['password'])
     host = db_config['host']
     database = db_config['database']
-
+    
     connection_string = f"mysql+mysqlconnector://{user}:{password}@{host}/{database}"
     return create_engine(connection_string)
 
@@ -41,22 +41,37 @@ def fetch_and_store_data():
 
     # Convert data to DataFrame
     dataf = pd.DataFrame(data)
+    
+    # Print columns to verify the actual names
+    print("Columns in fetched data:", dataf.columns)
 
     # Ensure 'datetime' column is properly converted to datetime format
     dataf.index = pd.to_datetime(dataf.index, errors='coerce')
     dataf.reset_index(inplace=True)
     dataf.rename(columns={'index': 'datetime'}, inplace=True)
 
+    # Rename columns if necessary
+    dataf.rename(columns={
+        'Open': 'open',
+        'High': 'high',
+        'Low': 'low',
+        'Close': 'close'
+    }, inplace=True)
+
     # Calculate 'ohlc4'
-    dataf['ohlc4'] = (dataf['open'] + dataf['high'] + dataf['low'] + dataf['close']) / 4
-    dataf['ohlc4'] = dataf['ohlc4'].round(2)
+    if {'open', 'high', 'low', 'close'}.issubset(dataf.columns):
+        dataf['ohlc4'] = (dataf['open'] + dataf['high'] + dataf['low'] + dataf['close']) / 4
+        dataf['ohlc4'] = dataf['ohlc4'].round(2)
+    else:
+        print("Missing expected columns. Available columns:", dataf.columns)
+        return  # Exit the function if necessary columns are missing
 
     # Define the columns to be selected, excluding 'symbol'
     selected_columns = ['datetime', 'open', 'high', 'low', 'close', 'ohlc4']
 
     # Create a table and insert data into MySQL table using SQLAlchemy
     engine = get_sqlalchemy_engine()
-
+    
     with get_mysql_connection() as connection:
         cursor = connection.cursor()
 
