@@ -1,0 +1,7 @@
+python-dotenv
+pandas_ta
+sqlalchemy
+sqlalchemy.orm
+mysql.connector
+breeze_connect
+sqlalchemy.engine.url
