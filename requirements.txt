@@ -5,3 +5,6 @@ sqlalchemy.orm
 mysql.connector
 breeze_connect
 sqlalchemy.engine.url
+aiomysql
+aiofiles
+asyncio
