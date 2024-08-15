@@ -1,3 +1,4 @@
+
 import json
 import pandas as pd
 import numpy as np
@@ -71,12 +72,13 @@ class IndicatorsData(Base):
     ATR = Column(Float)
     VStop2 = Column(Float)
     VStop3 = Column(Float)
-    BuyCall = Column(Float)
-    BuyPut = Column(Float)
-
+    TrendUp2 = Column(Float)
+    TrendUp3 = Column(Float)
+    Max = Column(Float)
+    Min = Column(Float)
+    
 def calculate_additional_indicators(data):
     """Calculate additional indicators and add them to the DataFrame."""
-    data['ohlc4'] = (data['high'] + data['low'] + data['close']) / 3
     data['ohlc4_sma5'] = ta.sma(data['ohlc4'], length=5)
     data['highsma5'] = ta.sma(data['high'], length=5)
     data['lowsma5'] = ta.sma(data['low'], length=5)
@@ -85,28 +87,20 @@ def calculate_additional_indicators(data):
     data['highsma5_off3'] = data['highsma5'].shift(3)
     data['lowsma5_off3'] = data['lowsma5'].shift(3)
     
-    # Calculate previous values
-    data['closesma9_prev'] = data['closesma9'].shift(1)
-    data['closesma26_prev'] = data['closesma26'].shift(1)
-    
-    # Calculate crossover and crossunder
-    data['BuyCall'] = ((data['closesma9'] > data['closesma26']) & 
-                       (data['closesma9_prev'] <= data['closesma26_prev'])).astype(int)
-
-    data['BuyPut'] = ((data['closesma9'] < data['closesma26']) & 
-                      (data['closesma9_prev'] >= data['closesma26_prev'])).astype(int)
-
+    # Round the output indicators to two decimal places
+    columns_to_round = ['ohlc4_sma5', 'highsma5', 'lowsma5', 'closesma26', 'closesma9', 'highsma5_off3', 'lowsma5_off3']
+    data[columns_to_round] = data[columns_to_round].round(2)
     return data
 
 def calculate_vstop(data):
     """Calculate VStop indicators from data."""
     data['ATR'] = ta.atr(data['high'], data['low'], data['close'], length=252)
     
-    # Initialize columns
+   # Initialize columns
     data['VStop2'] = np.nan
     data['VStop3'] = np.nan
-    data['TrendUp2'] = True
-    data['TrendUp3'] = True
+    data['TrendUp2'] = 1  # Start with trend up (1)
+    data['TrendUp3'] = 1  # Start with trend up (1)
     data['Max'] = data['close']
     data['Min'] = data['close']
 
@@ -119,7 +113,7 @@ def calculate_vstop(data):
         data.at[i, 'Max'] = max(data['Max'].iloc[i-1], src)
         data.at[i, 'Min'] = min(data['Min'].iloc[i-1], src)
         
-        if data['TrendUp2'].iloc[i-1]:
+        if data['TrendUp2'].iloc[i-1] == 1:
             data.at[i, 'VStop2'] = max(
                 data['VStop2'].iloc[i-1] if not np.isnan(data['VStop2'].iloc[i-1]) else src, 
                 data['Max'].iloc[i] - atr_m2
@@ -131,12 +125,12 @@ def calculate_vstop(data):
             )
         
         # Determine trend change
-        data.at[i, 'TrendUp2'] = src >= data['VStop2'].iloc[i]
+        data.at[i, 'TrendUp2'] = 1 if src >= data['VStop2'].iloc[i] else 0
         
         if data['TrendUp2'].iloc[i] != data['TrendUp2'].iloc[i-1]:
             data.at[i, 'Max'] = src
             data.at[i, 'Min'] = src
-            data.at[i, 'VStop2'] = data['Max'].iloc[i] - atr_m2 if data['TrendUp2'].iloc[i] else data['Min'].iloc[i] + atr_m2
+            data.at[i, 'VStop2'] = data['Max'].iloc[i] - atr_m2 if data['TrendUp2'].iloc[i] == 1 else data['Min'].iloc[i] + atr_m2
     
     # Reset Max and Min values for second calculation
     data['Max'] = data['close']
@@ -151,7 +145,7 @@ def calculate_vstop(data):
         data.at[i, 'Max'] = max(data['Max'].iloc[i-1], src)
         data.at[i, 'Min'] = min(data['Min'].iloc[i-1], src)
         
-        if data['TrendUp3'].iloc[i-1]:
+        if data['TrendUp3'].iloc[i-1] == 1:
             data.at[i, 'VStop3'] = max(
                 data['VStop3'].iloc[i-1] if not np.isnan(data['VStop3'].iloc[i-1]) else src, 
                 data['Max'].iloc[i] - atr_m3
@@ -163,12 +157,16 @@ def calculate_vstop(data):
             )
         
         # Determine trend change
-        data.at[i, 'TrendUp3'] = src >= data['VStop3'].iloc[i]
+        data.at[i, 'TrendUp3'] = 1 if src >= data['VStop3'].iloc[i] else 0
         
         if data['TrendUp3'].iloc[i] != data['TrendUp3'].iloc[i-1]:
             data.at[i, 'Max'] = src
             data.at[i, 'Min'] = src
-            data.at[i, 'VStop3'] = data['Max'].iloc[i] - atr_m3 if data['TrendUp3'].iloc[i] else data['Min'].iloc[i] + atr_m3
+            data.at[i, 'VStop3'] = data['Max'].iloc[i] - atr_m3 if data['TrendUp3'].iloc[i] == 1 else data['Min'].iloc[i] + atr_m3
+
+    # Round the output indicators to two decimal places
+    columns_to_round = ['ATR', 'VStop2', 'VStop3']
+    data[columns_to_round] = data[columns_to_round].round(2)
 
     return data
 
