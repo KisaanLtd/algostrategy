@@ -1,3 +1,4 @@
+
 import json
 import asyncio
 import aiomysql
@@ -6,6 +7,7 @@ import pandas as pd
 import talib
 import numpy as np
 from datetime import datetime, timedelta
+from sqlalchemy import create_engine, Column, Float, DateTime
 import time
 
 # Define timezone
@@ -23,6 +25,18 @@ api_session = config['api_session']
 # Database configuration
 db_config = config['db_config']
 HOLIDAYS = config['holidays']
+
+def get_sqlalchemy_engine():
+    """Create and return an SQLAlchemy engine."""
+    from urllib.parse import quote_plus
+    user = quote_plus(db_config['user'])
+    password = quote_plus(db_config['password'])
+    host = db_config['host']
+    database = db_config['database']
+    
+    connection_string = f"mysql+mysqlconnector://{user}:{password}@{host}/{database}"
+    return create_engine(connection_string)
+
 
 async def get_mysql_pool():
     """Create and return a connection pool to the MySQL database."""
@@ -88,14 +102,18 @@ async def create_tables_if_not_exists(pool):
             '''
             await cursor.execute(create_table_query)
 
-async def fetch_ohlctick_data(pool, latest_timestamp):
+#async def fetch_ohlctick_data(pool, latest_timestamp):
+async def fetch_ohlctick_data(pool):
     """Fetch new data from ohlctick_data table that is later than the latest timestamp in indicators_data."""
-    query = "SELECT * FROM ohlctick_data WHERE datetime > %s"
+    #query = "SELECT * FROM ohlctick_data WHERE datetime > %s;"
+    query = "SELECT * FROM ohlctick_data;"
     async with pool.acquire() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
-            await cur.execute(query, (latest_timestamp,))
+            #await cur.execute(query, (latest_timestamp,))
+            await cur.execute(query)
             result = await cur.fetchall()
             data = pd.DataFrame(result)
+            # Print the first few rows and the columns to debug
             return data
 
 def calculate_additional_indicators(data):
@@ -122,6 +140,7 @@ def calculate_vstop(data):
     data['TrendUp3'] = 1  # Start with trend up (1)
     data['Max'] = data['close']
     data['Min'] = data['close']
+    # data['RangeDiff']=data['Max']-data['Min']
 
     # Calculate VStop2
     for i in range(252, len(data)):
@@ -222,13 +241,15 @@ async def main():
         if is_business_day(now) and is_market_open():
             latest_timestamp_ohlctick = await get_latest_timestamp(pool, 'ohlctick_data')
             latest_timestamp_indicators = await get_latest_timestamp(pool, 'indicators_data')
-            
+            #print(latest_timestamp_ohlctick)
+            #print(latest_timestamp_indicators)
             if latest_timestamp_ohlctick > latest_timestamp_indicators:
                 # Fetch new data, calculate indicators, and update the database
+                #data = await fetch_ohlctick_data(pool, latest_timestamp_ohlctick)
                 data = await fetch_ohlctick_data(pool)
                 data = calculate_additional_indicators(data)
                 data = calculate_vstop(data)
-                await insert_data(pool, data[data['datetime'] == latest_timestamp_ohlctick])
+                await insert_latest_data(pool, data[data['datetime'] == latest_timestamp_ohlctick])
             
             # Wait for 5 seconds before checking again
             await asyncio.sleep(5)
