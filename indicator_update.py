@@ -1,4 +1,3 @@
-
 import json
 import asyncio
 import aiomysql
@@ -7,11 +6,23 @@ import pandas as pd
 import talib
 import numpy as np
 from datetime import datetime, timedelta
-from sqlalchemy import create_engine, Column, Float, DateTime
 import time
+import logging
+
 
 # Define timezone
 IST = pytz.timezone('Asia/Kolkata')
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("retrivedata.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # Load configuration from config.json
 with open('config.json', 'r') as f:
@@ -24,19 +35,8 @@ api_session = config['api_session']
 
 # Database configuration
 db_config = config['db_config']
-HOLIDAYS = config['holidays']
-
-def get_sqlalchemy_engine():
-    """Create and return an SQLAlchemy engine."""
-    from urllib.parse import quote_plus
-    user = quote_plus(db_config['user'])
-    password = quote_plus(db_config['password'])
-    host = db_config['host']
-    database = db_config['database']
-    
-    connection_string = f"mysql+mysqlconnector://{user}:{password}@{host}/{database}"
-    return create_engine(connection_string)
-
+# Convert holidays to a set for faster lookup
+HOLIDAYS = set(config['holidays'])
 
 async def get_mysql_pool():
     """Create and return a connection pool to the MySQL database."""
@@ -47,9 +47,12 @@ async def get_mysql_pool():
         user=db_config['user'],
         password=db_config['password'],
         db=db_config['database'],
-        autocommit=True
+        autocommit=True,
+        minsize=5,
+        maxsize=20
     )
     return pool
+
 
 async def get_latest_timestamp(pool, table_name):
     """Retrieve the latest timestamp from the specified table."""
@@ -58,25 +61,42 @@ async def get_latest_timestamp(pool, table_name):
         async with conn.cursor(aiomysql.DictCursor) as cursor:
             await cursor.execute(query)
             result = await cursor.fetchone()
-            latest_timestamp = result['latest_timestamp']
-            return latest_timestamp
+            # latest_timestamp = result['latest_timestamp']
+            return result['latest_timestamp']
+
+
 def is_market_open():
-    now = datetime.now(IST)
-    market_open_time = now.replace(hour=9, minute=14, second=0, microsecond=0)
-    market_close_time = now.replace(hour=15, minute=31, second=0, microsecond=0)
-    return market_open_time <= now <= market_close_time
+    """Check if the current time is within market hours."""
+    current_time = datetime.now(IST).time()
+    return datetime.strptime('09:15', '%H:%M').time() <= current_time < datetime.strptime('15:30', '%H:%M').time()
+
 
 def is_business_day(date):
     """Check if a given date is a business day."""
-    if date.weekday() >= 5:  # 5 = Saturday, 6 = Sunday
-        return False
-    return date.strftime('%Y-%m-%d') not in HOLIDAYS
+    return date.weekday() < 5 and date.strftime('%Y-%m-%d') not in HOLIDAYS
+
+
+def get_sleep_duration():
+    """Calculate the sleep duration until the next market open."""
+    # now = datetime.now(IST)
+    current_time = datetime.now(IST).time()
+    next_market_open_time = current_time.replace(
+        hour=9, minute=14, second=0, microsecond=0)
+    if current_time > next_market_open_time:
+        next_market_open_time += timedelta(days=1)
+        while not is_business_day(next_market_open_time):
+            next_market_open_time += timedelta(days=1)
+    sleep_duration = (next_market_open_time - current_time).total_seconds()
+    hours, remainder = divmod(sleep_duration, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    print(
+        f"Market is closed. Sleeping for {int(hours)}h {int(minutes)}m {int(seconds)}s.")
+    return sleep_duration
+
 
 async def create_tables_if_not_exists(pool):
     """Create the necessary tables if they do not exist."""
-    async with pool.acquire() as conn:
-        async with conn.cursor() as cursor:
-            create_table_query = '''
+    create_table_query = '''
             CREATE TABLE IF NOT EXISTS indicators_data (
                 datetime DATETIME PRIMARY KEY,
                 open DOUBLE,
@@ -100,25 +120,24 @@ async def create_tables_if_not_exists(pool):
                 Min DOUBLE
             )
             '''
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cursor:
             await cursor.execute(create_table_query)
 
-#async def fetch_ohlctick_data(pool, latest_timestamp):
+
 async def fetch_ohlctick_data(pool):
-    """Fetch new data from ohlctick_data table that is later than the latest timestamp in indicators_data."""
-    #query = "SELECT * FROM ohlctick_data WHERE datetime > %s;"
-    query = "SELECT * FROM ohlctick_data;"
+    """Fetch at least 260 rows of data from ohlctick_data table."""
+    query = "SELECT * FROM ohlctick_data ORDER BY datetime DESC LIMIT 260;"
     async with pool.acquire() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
-            #await cur.execute(query, (latest_timestamp,))
             await cur.execute(query)
-            result = await cur.fetchall()
-            data = pd.DataFrame(result)
-            # Print the first few rows and the columns to debug
+            data = pd.DataFrame(await cur.fetchall())
+            # Sort data in ascending order
+            data.sort_values(by='datetime', inplace=True)
             return data
 
 def calculate_additional_indicators(data):
     """Calculate additional indicators and add them to the DataFrame."""
-    data['ohlc4'] = data[['open', 'high', 'low', 'close']].mean(axis=1)
     data['ohlc4_sma5'] = talib.SMA(data['ohlc4'], timeperiod=5).round(2)
     data['highsma5'] = talib.SMA(data['high'], timeperiod=5).round(2)
     data['lowsma5'] = talib.SMA(data['low'], timeperiod=5).round(2)
@@ -207,10 +226,13 @@ def calculate_vstop(data):
     data[columns_to_round] = data[columns_to_round].round(2)
 
     return data
+
 async def insert_latest_data(pool, data):
     """Insert only the latest row of data into the database."""
     latest_row = data.iloc[-1]
-    
+
+    latest_row = latest_row.where(pd.notnull(latest_row), None)
+
     insert_query = """
     INSERT INTO indicators_data (datetime, open, high, low, close, ohlc4, ohlc4_sma5, highsma5, lowsma5, closesma26, closesma9, highsma5_off3, lowsma5_off3, ATR, VStop2, VStop3, TrendUp2, TrendUp3, Max, Min)
     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
@@ -227,48 +249,39 @@ async def insert_latest_data(pool, data):
         async with conn.cursor() as cur:
             await cur.execute(insert_query, (
                 latest_row['datetime'], latest_row['open'], latest_row['high'], latest_row['low'],
-                latest_row['close'], latest_row['ohlc4'], latest_row['ohlc4_sma5'], latest_row['highsma5'], 
+                latest_row['close'], latest_row['ohlc4'], latest_row['ohlc4_sma5'], latest_row['highsma5'],
                 latest_row['lowsma5'], latest_row['closesma26'], latest_row['closesma9'], latest_row['highsma5_off3'],
-                latest_row['lowsma5_off3'], latest_row['ATR'], latest_row['VStop2'], latest_row['VStop3'], 
+                latest_row['lowsma5_off3'], latest_row['ATR'], latest_row['VStop2'], latest_row['VStop3'],
                 latest_row['TrendUp2'], latest_row['TrendUp3'], latest_row['Max'], latest_row['Min']
             ))
+            logger.info(f"Inserted/Updated data for {latest_row['datetime']}")
 
 async def main():
     pool = await get_mysql_pool()
-    
-    while True:
-        now = datetime.now(IST)
-        if is_business_day(now) and is_market_open():
-            latest_timestamp_ohlctick = await get_latest_timestamp(pool, 'ohlctick_data')
-            latest_timestamp_indicators = await get_latest_timestamp(pool, 'indicators_data')
-            #print(latest_timestamp_ohlctick)
-            #print(latest_timestamp_indicators)
-            if latest_timestamp_ohlctick > latest_timestamp_indicators:
-                # Fetch new data, calculate indicators, and update the database
-                #data = await fetch_ohlctick_data(pool, latest_timestamp_ohlctick)
+    try:
+        while True:
+            if is_market_open() and is_business_day(datetime.now(IST).date()):
+                logger.info("Market is open. Fetching data...")
                 data = await fetch_ohlctick_data(pool)
-                data = calculate_additional_indicators(data)
-                data = calculate_vstop(data)
-                await insert_latest_data(pool, data[data['datetime'] == latest_timestamp_ohlctick])
-            
-            # Wait for 5 seconds before checking again
-            await asyncio.sleep(5)
-        else:
-            # Calculate the sleep duration until the next market open
-            next_market_open_time = now.replace(hour=9, minute=14, second=0, microsecond=0)
-            if now > next_market_open_time:
-                next_market_open_time += timedelta(days=1)
-            # Adjust if it's a weekend or holiday
-            while not is_business_day(next_market_open_time):
-                next_market_open_time += timedelta(days=1)
-            sleep_duration = (next_market_open_time - now).total_seconds()
-            print(f"Sleeping for {sleep_duration / 3600:.2f} hours until next market open")
-            await asyncio.sleep(sleep_duration)
+                latest_timestamp_ohlctick = await get_latest_timestamp(pool, 'ohlctick_data')
+                latest_timestamp_indicators = await get_latest_timestamp(pool, 'indicators_data')
+                if len(data) >= 260:
+                    # data['ohlc4'] = data[['open', 'high', 'low', 'close']].mean(axis=1).round(2)
+                    data = calculate_additional_indicators(data)
+                    data = calculate_vstop(data)
+                    await insert_latest_data(pool, data)
+                    #await insert_latest_data(pool, data[data['datetime'] == latest_timestamp_ohlctick])
+                else:
+                    logger.warning("Insufficient data to calculate indicators.")
+                await asyncio.sleep(60)  # Wait 60 seconds before fetching data again
+            else:
+                sleep_duration = get_sleep_duration()
+                logger.info(f"Market is closed. Sleeping for {sleep_duration/3600:.2f} hours.")
+                await asyncio.sleep(sleep_duration)  # Sleep until the next market open
+    finally:
+        pool.close()
+        await pool.wait_closed()
 
-    # Close the pool when done
-    pool.close()
-    await pool.wait_closed()
 
-# Entry point
-if __name__ == '__main__':
+if __name__ == "__main__":
     asyncio.run(main())
