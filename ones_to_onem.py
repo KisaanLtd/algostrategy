@@ -105,58 +105,69 @@ async def insert_tick_dataframe(pool, table_name, tick_df):
 async def fetch_and_resample_data(pool):
     """Fetch data from ohlctick_1sdata, resample it, and insert new indices into ohlctick_1mdata."""
     try:
+        # Get current time in IST
         now = datetime.now(IST)
+        
+        # Define market open and close times
         market_open_time = datetime.combine(now.date(), time(9, 15))
         market_close_time = datetime.combine(now.date(), time(15, 30))
+    
+        ## Create a period range for the market hours with 1-minute frequency
+        period_index = pd.period_range(market_open_time, market_close_time, freq='1T')
+        period_now=pd.Period.now('1T')
+        open_time_datetime64 = pd.Period(market_open_time, '1T').start_time
+        close_time_datetime64 = pd.Period(market_close_time, '1T').end_time
+        period_now_datetime64 = period_now.start_time
+        periods=len(period_index)
+        min_datetime = min(close_time_datetime64, period_now_datetime64)
 
-        # Create a period range for the market hours with 1-minute frequency
-        resample_periods = pd.date_range(start=market_open_time, end=market_close_time, freq='1T')
-
+        # Fetch data from the MySQL database
         async with pool.acquire() as conn:
             async with conn.cursor() as cur:
                 query = 'SELECT * FROM ohlctick_1sdata ORDER BY datetime'
                 await cur.execute(query)
                 data = await cur.fetchall()
-                columns = [desc[0] for desc in cur.description]
+                columns = [desc[0] for desc in cur.description]  # Get column names from cursor description
 
-                if not data:
-                    print("No data found in ohlctick_1sdata")
-                    return
-
-                # Convert the fetched data into a DataFrame
+                ### Convert the fetched data into a DataFrame
                 ohlc_1s_df = pd.DataFrame(data, columns=columns)
-                
-                # Ensure datetime is parsed correctly
-                ohlc_1s_df['datetime'] = pd.to_datetime(ohlc_1s_df['datetime'], errors='coerce')
-                
-                # Set datetime column as index
-                ohlc_1s_df.set_index('datetime', inplace=True)
 
-                # Reindex the DataFrame to include all periods and forward-fill missing values
-                ohlc_1s_df = ohlc_1s_df.reindex(resample_periods).ffill()
-                print(f"DataFrame after reindexing and forward-filling: {ohlc_1s_df.head()}")
-
-                # Resample data to 1-minute intervals
-                ohlc_1m_df = ohlc_1s_df.resample('1T').agg({
-                    'open': 'first',
+                ohlc_dict = {                                                                                                             
+                            'open': 'first',
                     'high': 'max',
                     'low': 'min',
                     'close': 'last',
                     'ohlc4': 'mean'
-                }).dropna().reset_index()
+                    }
+                
+                # print(ohlc_dict)
+                ### Ensure datetime is parsed correctly and set as index
+                ohlc_1s_df['datetime'] = pd.to_datetime(ohlc_1s_df['datetime'], errors='coerce')
+                
+                ### Set datetime column as index
+                ohlc_1s_df.set_index('datetime', inplace=True)
+                period_now=pd.Period.now('1T')
+                period_index = pd.date_range(start=open_time_datetime64, end=min_datetime, freq='S')
+                periods = len(period_index)
+                ohlc_1s_df = ohlc_1s_df.reindex(period_index)
+                # print(ohlc_1s_df)
+                ohlc_1m_df = ohlc_1s_df.resample('1T').agg(ohlc_dict).reset_index()
+                # Handle NaN values: fill or drop as necessary
+                ohlc_1m_df.fillna({
+                    'open': 0.0, 
+                    'high': 0.0, 
+                    'low': 0.0, 
+                    'close': 0.0, 
+                    'ohlc4': 0.0
+                 }, inplace=True)
 
-                if ohlc_1m_df.empty:
-                    print("Resampled data is empty")
-                    return
-
-                # Format datetime to string for database insertion
-                ohlc_1m_df['datetime'] = ohlc_1m_df['datetime'].dt.strftime('%Y-%m-%d %H:%M:%S')
-
-                # Insert resampled data into the 1-minute table
+                ohlc_1m_df.reset_index(inplace=False)
+                ohlc_1m_df.rename(columns={'index': 'datetime'}, inplace=True)
+                ohlc_1m_df['ohlc4'] = ohlc_1m_df['ohlc4'].round(2)
+                ###Insert resampled data into the 1-minute table
                 await insert_tick_dataframe(pool, 'ohlctick_1mdata', ohlc_1m_df)
-
     except Exception as e:
-        print(f"Error fetching and resampling data: {e}")
+        logger.error(f"Error fetching and resampling data: {e}")
 
 async def on_ticks(tick):
     """Callback function to process received ticks."""
@@ -238,26 +249,29 @@ async def main():
     pool = await get_mysql_pool()
     await create_tables_if_not_exists(pool)
 
-    while True:
-        now = datetime.now(IST)
-        if is_business_day(now) and is_market_open():
-            await connect_to_websocket()
-            await fetch_and_resample_data(pool)
-        else:
-            print("Market is closed. Sleeping until the next market open...")
-            await disconnect_from_websocket()
-
-            # Calculate the time until the next market open
-            if now.time() >= time(15, 30):
-                next_market_open = datetime.combine(now + timedelta(days=1), time(9, 15))
+    try:
+        while True:
+            now = datetime.now(IST)
+            if is_business_day(now) and is_market_open():
+                await connect_to_websocket()
+                while is_market_open():
+                    await fetch_and_resample_data(pool)
+                    await asyncio.sleep(60)  # Wait for 1 minute between each fetch
+                await disconnect_from_websocket()
             else:
-                next_market_open = datetime.combine(now, time(9, 15))
-
-            sleep_duration = (next_market_open - now).total_seconds()
-            await asyncio.sleep(sleep_duration)
-
-        # Sleep for a short duration before the next check
-        await asyncio.sleep(10)
+                # Wait until the next market open
+                now = datetime.now(IST)
+                next_market_open = datetime.combine(now.date(), time(9, 15), tzinfo=IST)
+                if now.time() > time(15, 30):
+                    next_market_open += timedelta(days=1)
+                time_until_open = (next_market_open - now).total_seconds()
+                print(f"Market closed. Sleeping for {time_until_open} seconds.")
+                await asyncio.sleep(time_until_open)
+    except KeyboardInterrupt:
+        print("Process interrupted")
+    finally:
+        pool.close()
+        await pool.wait_closed()
 
 if __name__ == "__main__":
     asyncio.run(main())
