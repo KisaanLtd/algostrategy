@@ -3,8 +3,6 @@ import asyncio
 import aiomysql
 import pytz
 import pandas as pd
-# import numpy as np
-# import logging
 from datetime import datetime, time, timedelta
 from breeze_connect import BreezeConnect
 
@@ -111,14 +109,13 @@ async def fetch_and_resample_data(pool):
         # Define market open and close times
         market_open_time = datetime.combine(now.date(), time(9, 15))
         market_close_time = datetime.combine(now.date(), time(15, 30))
-    
         ## Create a period range for the market hours with 1-minute frequency
         period_index = pd.period_range(market_open_time, market_close_time, freq='1T')
         period_now=pd.Period.now('1T')
         open_time_datetime64 = pd.Period(market_open_time, '1T').start_time
         close_time_datetime64 = pd.Period(market_close_time, '1T').end_time
         period_now_datetime64 = period_now.start_time
-        periods=len(period_index)
+        # periods=len(period_index)
         min_datetime = min(close_time_datetime64, period_now_datetime64)
 
         # Fetch data from the MySQL database
@@ -148,10 +145,11 @@ async def fetch_and_resample_data(pool):
                 ohlc_1s_df.set_index('datetime', inplace=True)
                 period_now=pd.Period.now('1T')
                 period_index = pd.date_range(start=open_time_datetime64, end=min_datetime, freq='S')
-                periods = len(period_index)
+                # periods = len(period_index)
                 ohlc_1s_df = ohlc_1s_df.reindex(period_index)
                 # print(ohlc_1s_df)
-                ohlc_1m_df = ohlc_1s_df.resample('1T').agg(ohlc_dict).reset_index()
+                # ohlc_1m_df = ohlc_1s_df.resample('1T').agg(ohlc_dict).reset_index()
+                ohlc_1m_df = ohlc_1s_df.resample('1T', closed='left', label='left').agg(ohlc_dict).reset_index()
                 # Handle NaN values: fill or drop as necessary
                 ohlc_1m_df.fillna({
                     'open': 0.0, 
@@ -164,14 +162,15 @@ async def fetch_and_resample_data(pool):
                 ohlc_1m_df.reset_index(inplace=False)
                 ohlc_1m_df.rename(columns={'index': 'datetime'}, inplace=True)
                 ohlc_1m_df['ohlc4'] = ohlc_1m_df['ohlc4'].round(2)
+                two_rows = ohlc_1m_df.tail(2)
                 ###Insert resampled data into the 1-minute table
-                await insert_tick_dataframe(pool, 'ohlctick_1mdata', ohlc_1m_df)
+                await insert_tick_dataframe(pool, 'ohlctick_1mdata', two_rows)
     except Exception as e:
-        logger.error(f"Error fetching and resampling data: {e}")
+        print(f"Error fetching and resampling data: {e}")
 
 async def on_ticks(tick):
     """Callback function to process received ticks."""
-    print("Received ticks:", tick)
+    # print("Received ticks:", tick)
     try:
         # Convert tick to a list of dictionaries if it's a single dictionary
         if isinstance(tick, dict):
@@ -256,7 +255,13 @@ async def main():
                 await connect_to_websocket()
                 while is_market_open():
                     await fetch_and_resample_data(pool)
-                    await asyncio.sleep(60)  # Wait for 1 minute between each fetch
+
+                    # Sleep until the end of the current minute
+                    current_time = pd.Timestamp.now()
+                    next_minute_end_time = pd.Period.now(freq='1T').end_time
+                    sleep_duration = (next_minute_end_time - current_time).total_seconds()
+                    
+                    await asyncio.sleep(sleep_duration)  # Wait for 1 minute between each fetch
                 await disconnect_from_websocket()
             else:
                 # Wait until the next market open
