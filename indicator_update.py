@@ -72,13 +72,13 @@ class IndicatorUpdate:
                 closesma5 DOUBLE,
                 highsma5_off3 DOUBLE,
                 lowsma5_off3 DOUBLE,
-                ATR DOUBLE,
-                VStop2 DOUBLE,
-                VStop3 DOUBLE,
                 KST DOUBLE,
                 KST9 DOUBLE,
                 BuyCall INTEGER,
                 BuyPut INTEGER,
+                ATR DOUBLE,
+                VStop2 DOUBLE,
+                VStop3 DOUBLE,
                 TrendUp2 INTEGER,
                 TrendUp3 INTEGER,
                 Max DOUBLE,
@@ -180,7 +180,7 @@ class IndicatorUpdate:
         replace_query = '''
             REPLACE INTO indicators_data (
                 datetime, open, high, low, close, ohlc4, ohlc4_sma5, highsma5, lowsma5, closesma26, closesma5, 
-                highsma5_off3, lowsma5_off3, ATR, VStop2, VStop3, KST, KST9, BuyCall, BuyPut, TrendUp2, TrendUp3, Max, Min
+                highsma5_off3, lowsma5_off3, KST, KST9, BuyCall, BuyPut, ATR, VStop2, VStop3, TrendUp2, TrendUp3, Max, Min
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         '''
         async with pool.acquire() as conn:
