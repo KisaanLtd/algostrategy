@@ -4,201 +4,246 @@ import aiomysql
 import pytz
 import pandas as pd
 import numpy as np
-from breeze_connect import BreezeConnect
-from datetime import datetime, timedelta
+import logging
+from datetime import datetime, time, timedelta
 from scipy.signal import find_peaks
+from breeze_connect import BreezeConnect
 
-# Define timezone
-IST = pytz.timezone('Asia/Kolkata')
+# logging.basicConfig(level=logging.INFO)
+# Configure logging to output to a file
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s - %(levelname)s - %(message)s',
+                    handlers=[
+                        logging.FileHandler("trading_bot.log"),
+                        logging.StreamHandler()
+                    ])
 
-# Load configuration from config.json
-with open('config.json', 'r') as f:
-    config = json.load(f)
+class TradingBot:
+    def __init__(self, config):
+        self.config = config
+        self.api = BreezeConnect(api_key=config['api_key'])
+        self.api.generate_session(api_secret=config['secret_key'], session_token=config['api_session'])
+        self.default_expiry_date = config.get('default_expiry_date', '2024-09-04')  # Set default expiry date
+        expiry_date = self.config['expiry_date']  # Set default expiry date
 
-api_key = config['api_key']
-api_secret = config['api_secret']
-secret_key = config['secret_key']
-api_session = config['api_session']
+    async def get_mysql_pool(self):
+        db_config = self.config['db_config']
+        port = int(db_config['port'])
+        pool = await aiomysql.create_pool(
+            host=db_config['host'],
+            port=port,
+            user=db_config['user'],
+            password=db_config['password'],
+            db=db_config['database'],
+            autocommit=True,
+            minsize=5,
+            maxsize=20
+        )
+        return pool
 
-# Database configuration
-db_config = config['db_config']
-HOLIDAYS = config['holidays']
-default_expiry_date = config['expiry_date']  # Load default expiry date
+    async def fetch_indicators_data(self, pool, table_name):
+        query = f'SELECT * FROM `{table_name}` ORDER BY `datetime`'
+        async with pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(query)
+                result = await cur.fetchall()
+                data = pd.DataFrame(result)
+                data['datetime'] = pd.to_datetime(data['datetime'])
+                data = data.sort_values(by='datetime', ascending=True)
+        return data
 
-# Initialize BreezeConnect API
-# api = BreezeConnect(api_key=api_key)
-# api.generate_session(api_secret=secret_key, session_token=api_session)
+    async def get_peak_trough(self, data):
+        data['datetime'] = pd.to_datetime(data['datetime'])
+        highs_array = data['highsma5'].to_numpy()
+        lows_array = data['lowsma5'].to_numpy()
 
-async def get_mysql_pool():
-    """Create and return a connection pool to the MySQL database."""
-    pool = await aiomysql.create_pool(
-        host=db_config['host'],
-        port=int(db_config['port']),
-        user=db_config['user'],
-        password=db_config['password'],
-        db=db_config['database'],
-        autocommit=True
-    )
-    return pool
+        peaks, properties_peaks = find_peaks(highs_array, prominence=True)
+        troughs, properties_troughs = find_peaks(-lows_array, prominence=True)
 
-async def fetch_indicators_data(pool):
-    """Fetch data from ohlctick_data table."""
-    query = "SELECT * FROM indicators_data;"
-    async with pool.acquire() as conn:
-        async with conn.cursor(aiomysql.DictCursor) as cur:
-            await cur.execute(query)
-            result = await cur.fetchall()
-            return pd.DataFrame(result)
+        peak_df = pd.DataFrame({
+            'Datetime': data['datetime'].to_numpy()[peaks],
+            'PeakValue': highs_array[peaks],
+            'PeakProm': properties_peaks['prominences']
+        })
+        trough_df = pd.DataFrame({
+            'Datetime': data['datetime'].to_numpy()[troughs],
+            'TroughValue': lows_array[troughs],
+            'TroughProm': properties_troughs['prominences']
+        })
 
-def detect_crossovers(data):
-    """Detect crossover and crossunder between ohlc4_sma5 and highsma5_off3, lowsma5_off3."""
-    crossover = (data['ohlc4_sma5'] > data['highsma5_off3']) & (data['ohlc4_sma5'].shift(-1) <= data['highsma5_off3'].shift(-1))
-    crossunder = (data['ohlc4_sma5'] < data['lowsma5_off3']) & (data['ohlc4_sma5'].shift(-1) >= data['lowsma5_off3'].shift(-1))
-    return data.loc[crossover], data.loc[crossunder]
+        peak_df_filtered = peak_df[peak_df['PeakProm'] > 80]
+        trough_df_filtered = trough_df[trough_df['TroughProm'] > 80]
 
-def TrendUp2_cross(data):
-    """Detect crossovers and crossunders for TrendUp2."""
-    TrendUp2crossover = (data['TrendUp2'] == 1) & (data['TrendUp2'].shift(-1) == 0)
-    TrendUp2crossunder = (data['TrendUp2'] == 0) & (data['TrendUp2'].shift(-1) == 1)
+        peak_sorted_df = peak_df_filtered.sort_values(by='Datetime', ascending=True)
+        trough_sorted_df = trough_df_filtered.sort_values(by='Datetime', ascending=True)
+        
+        latest_peak_row = peak_sorted_df.iloc[-1] if not peak_sorted_df.empty else pd.Series()
+        latest_trough_row = trough_sorted_df.iloc[-1] if not trough_sorted_df.empty else pd.Series()
+        
+        return latest_peak_row, latest_trough_row, peak_sorted_df, trough_sorted_df
 
-    return (
-        data.loc[TrendUp2crossover].sort_values(by='datetime', ascending=False),
-        data.loc[TrendUp2crossunder].sort_values(by='datetime', ascending=False)
-    )
+    async def get_strike_prices(self, latest_peak_row, latest_trough_row):
+        if latest_peak_row.empty or latest_trough_row.empty:
+            return None, None, None, None
 
-def get_peak_trough(data):
-    """Extract the latest peaks and troughs from the DataFrame."""
-    data['datetime'] = pd.to_datetime(data['datetime'])
-    highs_array = data['highsma5'].to_numpy()
-    lows_array = data['lowsma5'].to_numpy()
+        latest_peak_prom = latest_peak_row['PeakProm']
+        latest_peak_value = latest_peak_row['PeakValue']
+        latest_peak_datetime = latest_peak_row['Datetime']
+        latest_trough_prom = latest_trough_row['TroughProm']
+        latest_trough_value = latest_trough_row['TroughValue']
+        latest_trough_datetime = latest_trough_row['Datetime']
 
-    peaks, properties = find_peaks(highs_array, width=5, prominence=True)
-    troughs, properties_troughs = find_peaks(-lows_array, width=5, prominence=True)
+        strike_price_ce = int((latest_trough_value - latest_trough_value % 100) + 100)
+        strike_price_pe = int((latest_peak_value - latest_peak_value % 100) - 100)
 
-    peak_df = pd.DataFrame({
-        'Datetime': data['datetime'].to_numpy()[peaks],
-        'PeakValue': highs_array[peaks],
-        'PeakProm': properties['prominences']
-    })
+        max_peak_trough_datetime = max(latest_peak_datetime, latest_trough_datetime)
+        peak_trough_range = (latest_peak_value - latest_trough_value).round(2)
 
-    trough_df = pd.DataFrame({
-        'Datetime': data['datetime'].to_numpy()[troughs],
-        'TroughValue': lows_array[troughs],
-        'TroughProm': properties_troughs['prominences']
-    })
+        if max_peak_trough_datetime == latest_peak_datetime and peak_trough_range >= 70:
+            if latest_peak_prom > latest_trough_prom:
+                return strike_price_pe, "put", max_peak_trough_datetime, peak_trough_range
+        elif max_peak_trough_datetime == latest_trough_datetime and peak_trough_range >= 70:
+            if latest_peak_prom < latest_trough_prom:
+                return strike_price_ce, "call", max_peak_trough_datetime, peak_trough_range
 
-    latest_peak_row = peak_df.sort_values(by='Datetime', ascending=False).iloc[0] if not peak_df.empty else pd.Series(dtype='float64')
-    latest_trough_row = trough_df.sort_values(by='Datetime', ascending=False).iloc[0] if not trough_df.empty else pd.Series(dtype='float64')
+        return None, None, max_peak_trough_datetime, peak_trough_range
 
-    return latest_peak_row, latest_trough_row, peak_df, trough_df
+    async def TrendUp2_cross(self, data):
+        TrendUp2crossover = (data['TrendUp2'] == 1) & (data['TrendUp2'].shift(1) == 0)
+        TrendUp2crossunder = (data['TrendUp2'] == 0) & (data['TrendUp2'].shift(1) == 1)
+        return data.loc[TrendUp2crossover], data.loc[TrendUp2crossunder]
 
-def filter_prominent_peaks_troughs(peak_df, trough_df, threshold=100):
-    """Filter peaks and troughs where PeakProm > 100 or TroughProm > 100."""
-    filtered_peak_df = peak_df[peak_df['PeakProm'] > threshold]
-    filtered_trough_df = trough_df[trough_df['TroughProm'] > threshold]
-    latest_filtered_peak_row = filtered_peak_df.sort_values(by='Datetime', ascending=False).iloc[0] if not filtered_peak_df.empty else pd.Series(dtype='float64')
-    latest_filtered_trough_row = filtered_trough_df.sort_values(by='Datetime', ascending=False).iloc[0] if not filtered_trough_df.empty else pd.Series(dtype='float64')
-    return latest_filtered_peak_row, latest_filtered_trough_row
+    async def get_entry_trigger(self, latest_peak_row, latest_trough_row, TrendUp2crossover, TrendUp2crossunder):
+        if latest_peak_row.empty or latest_trough_row.empty:
+            return None, None
 
-def get_strike_prices(latest_peak_row, latest_trough_row):
-    latest_peakprom = latest_peak_row['PeakProm']
-    latest_peak_value = latest_peak_row['PeakValue']
-    latest_peak_datetime = latest_peak_row['Datetime']
-    latest_troughprom = latest_trough_row['TroughProm']
-    latest_trough_value = latest_trough_row['TroughValue']
-    latest_trough_datetime = latest_trough_row['Datetime']
-    strike_price_ce = int((latest_trough_value - latest_trough_value % 100) + 100)
-    strike_price_pe = int((latest_peak_value - latest_peak_value % 100) - 100)
+        latest_peak_datetime = latest_peak_row['Datetime']
+        latest_trough_datetime = latest_trough_row['Datetime']
+        latest_trendup2_crossover_datetime = TrendUp2crossover['datetime'].max() if not TrendUp2crossover.empty else pd.Timestamp.min
+        latest_trendup2_crossunder_datetime = TrendUp2crossunder['datetime'].max() if not TrendUp2crossunder.empty else pd.Timestamp.min
+        max_trendup2cross_datetime = max(latest_trendup2_crossover_datetime, latest_trendup2_crossunder_datetime)
+        max_peak_trough_datetime = max(latest_peak_datetime, latest_trough_datetime)
 
-    if (latest_peakprom > 100) & (latest_peakprom > latest_troughprom):
-        return strike_price_pe, "put"
-    elif (latest_peakprom < latest_troughprom) & (100 < latest_troughprom):
-        return strike_price_ce, "call"
-    return None, None
+        trendup2_crossunder_vstop2 = TrendUp2crossunder.iloc[-1]['VStop2'] if not TrendUp2crossunder.empty else float('inf')
+        trendup2_crossunder_highsma5 = TrendUp2crossunder.iloc[-1]['highsma5'] if not TrendUp2crossunder.empty else float('inf')
+        trendup2_crossunder_highsma5_off3 = TrendUp2crossunder.iloc[-1]['highsma5_off3'] if not TrendUp2crossunder.empty else float('inf')
 
-def get_entry_trigger(latest_peak_row, latest_trough_row, crossover_points, crossunder_points, TrendUp2crossover_sorted, TrendUp2crossunder_sorted):
-    """Determine the entry trigger based on crossover and crossunder points."""
-    if not latest_peak_row.empty and not latest_trough_row.empty:
-        if (latest_peak_row['PeakProm'] > 100) & (latest_peak_row['PeakProm'] > latest_trough_row['TroughProm']):
-            if not TrendUp2crossunder_sorted.empty and not crossunder_points.empty:
-                if TrendUp2crossunder_sorted.iloc[0]['datetime'] < crossunder_points.iloc[0]['datetime']:
-                    return TrendUp2crossunder_sorted.iloc[0]['lowsma5']
-                else:
-                    return crossunder_points.iloc[0]['lowsma5']
-        elif (latest_peak_row['PeakProm'] < latest_trough_row['TroughProm']) & (100 < latest_trough_row['TroughProm']):
-            if not TrendUp2crossover_sorted.empty and not crossover_points.empty:
-                if TrendUp2crossover_sorted.iloc[0]['datetime'] < crossover_points.iloc[0]['datetime']:
-                    return TrendUp2crossover_sorted.iloc[0]['highsma5']
-                else:
-                    return crossover_points.iloc[0]['highsma5']
-    return None
+        trendup2_crossover_vstop2 = TrendUp2crossover.iloc[-1]['VStop2'] if not TrendUp2crossover.empty else -float('inf')
+        trendup2_crossover_lowsma5 = TrendUp2crossover.iloc[-1]['lowsma5'] if not TrendUp2crossover.empty else -float('inf')
+        trendup2_crossover_lowsma5_off3 = TrendUp2crossover.iloc[-1]['lowsma5_off3'] if not TrendUp2crossover.empty else -float('inf')
 
-def place_order(api, stock_code, exchange_code, product, action, order_type, stoploss, quantity, price, validity, validity_date, disclosed_quantity, expiry_date, right, strike_price):
-    """Place an order through the BreezeConnect API."""
-    try:
-        order_id = api.place_order(
-            stock_code=stock_code,
-            exchange_code=exchange_code,
-            product=product,
-            action=action,
-            order_type=order_type,
-            stoploss=stoploss,
-            quantity=quantity,
-            price=price,
-            validity=validity,
-            validity_date=validity_date,
-            disclosed_quantity=disclosed_quantity,
+        call_entry_trigger = None
+        put_entry_trigger = None
+
+        if not latest_peak_row.empty and not latest_trough_row.empty:
+            if (max_peak_trough_datetime == latest_peak_datetime) and (max_trendup2cross_datetime > max_peak_trough_datetime):
+                if not TrendUp2crossunder.empty and (max_trendup2cross_datetime == latest_trendup2_crossunder_datetime):
+                    if trendup2_crossunder_highsma5 < trendup2_crossunder_highsma5_off3 < trendup2_crossunder_vstop2:
+                        put_entry_trigger = trendup2_crossunder_highsma5_off3
+                        if trendup2_crossunder_highsma5 < trendup2_crossunder_vstop2:
+                            put_entry_trigger = trendup2_crossunder_highsma5
+                    else:
+                        put_entry_trigger = trendup2_crossunder_vstop2
+
+            elif (max_peak_trough_datetime == latest_trough_datetime) and (max_trendup2cross_datetime > max_peak_trough_datetime):
+                if not TrendUp2crossover.empty and (max_trendup2cross_datetime == latest_trendup2_crossover_datetime):
+                    if trendup2_crossover_lowsma5 > trendup2_crossover_lowsma5_off3 > trendup2_crossover_vstop2:
+                        call_entry_trigger = trendup2_crossover_lowsma5_off3
+                        if trendup2_crossover_lowsma5 > trendup2_crossover_vstop2:
+                            call_entry_trigger = trendup2_crossover_lowsma5
+                    else:
+                        call_entry_trigger = trendup2_crossover_vstop2
+
+        return call_entry_trigger, put_entry_trigger
+
+    async def place_order(self, option_type, strike_price, max_peak_trough_datetime, entry_trigger_price):
+        if not strike_price or not option_type:
+            logging.error("Invalid option_type or strike_price for placing order.")
+            return
+
+        transaction_type = "BUY"  # Assuming you want to place a BUY order
+        # expiry_date = self.default_expiry_date  # Default expiry date
+        expiry_date = self.config['expiry_date']
+
+        response = self.api.place_order(
+            stock_code="CNXBAN",
+            exchange_code="NFO",
+            product="options",
+            action=transaction_type,
+            order_type="market",
+            stoploss="",
+            quantity="15",
+            price="",
+            validity="day",
+            validity_date=datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%Y-%m-%d'),
+            disclosed_quantity='0',
             expiry_date=expiry_date,
-            right=right,
+            right=option_type,
             strike_price=strike_price
         )
-        print(f"Order placed successfully! Order ID: {order_id}")
-    except Exception as e:
-        print(f"Failed to place order: {str(e)}")
 
-async def get_signal():
-    pool = await get_mysql_pool()
-    indicators_data = await fetch_indicators_data(pool)
-    crossover_points, crossunder_points = detect_crossovers(indicators_data)
-    TrendUp2crossover_sorted, TrendUp2crossunder_sorted = TrendUp2_cross(indicators_data)
-    latest_peak_row, latest_trough_row, peak_df, trough_df = get_peak_trough(indicators_data)
-    strike_price, option_type = get_strike_prices(latest_peak_row, latest_trough_row)
-    entry_trigger = get_entry_trigger(latest_peak_row, latest_trough_row, crossover_points, crossunder_points, TrendUp2crossover_sorted, TrendUp2crossunder_sorted)
+        # logging.info(f"Order placed for {option_type} {strike_price} : {response}")
+        logging.info(f"Order placed for {option_type} {strike_price} at price {entry_trigger_price}: {response}")
 
-    if strike_price is not None and entry_trigger is not None and option_type is not None:
-        signal_buycall = (entry_trigger > indicators_data['low'].iloc[0]).astype(int)  # Fetch the latest tick data
-        signal_buyput = (entry_trigger < indicators_data['high'].iloc[0]).astype(int)
-        return signal_buycall, signal_buyput, strike_price, option_type
-    return None, None, None, None
+    async def run(self):
+        table_name = "indicators_data"
+        pool = await self.get_mysql_pool()
+        try:
+            data = await self.fetch_indicators_data(pool, table_name)
+            latest_peak_row, latest_trough_row, _, _ = await self.get_peak_trough(data)
+            TrendUp2crossover, TrendUp2crossunder = await self.TrendUp2_cross(data)
+            call_entry_trigger, put_entry_trigger = await self.get_entry_trigger(latest_peak_row, latest_trough_row, TrendUp2crossover, TrendUp2crossunder)
 
-async def main():
-    signal_buycall, signal_buyput, strike_price, option_type = await get_signal()
-    print(signal_buycall)
-    print(signal_buyput)
-    print(strike_price)
-    print(option_type)
+            strike_price, option_type, max_peak_trough_datetime, peak_trough_range = await self.get_strike_prices(latest_peak_row, latest_trough_row)
+            
+            if option_type == 'call' and call_entry_trigger and strike_price is not None:
+                if (call_entry_trigger > data['low'].iloc[-1]):
+                    await self.place_order(option_type, strike_price, max_peak_trough_datetime, call_entry_trigger)
+            elif option_type == 'put' and put_entry_trigger and strike_price is not None:
+                if (put_entry_trigger < data['high'].iloc[-1]):
+                    await self.place_order(option_type, strike_price, max_peak_trough_datetime, put_entry_trigger)
+        finally:
+            pool.close()
+            await pool.wait_closed()
 
-    if signal_buycall == 1 and option_type == "call":
-        print(f"Call: Entry triggered at {datetime.now(IST)} at strike price {strike_price}")
-        # You can uncomment and adjust the API call parameters when integrating with BreezeConnect
-        # place_order(api, stock_code='BANKNIFTY', exchange_code='NFO', product='options', action='buy',
-        #             order_type='limit', stoploss='100', quantity='25', price=entry_trigger,
-        #             validity='DAY', validity_date=None, disclosed_quantity=None, expiry_date=default_expiry_date,
-        #             right='call', strike_price=str(strike_price)))
-    elif signal_buyput == 1 and option_type == "put":
-        print(f"Put: Entry triggered at {datetime.now(IST)} at strike price {strike_price}")
-        # You can uncomment and adjust the API call parameters when integrating with BreezeConnect
-        # place_order(api, stock_code='BANKNIFTY', exchange_code='NFO', product='options', action='buy',
-        #             order_type='limit', stoploss='100', quantity='25', price=entry_trigger,
-        #             validity='DAY', validity_date=None, disclosed_quantity=None, expiry_date=default_expiry_date,
-        #             right='put', strike_price=str(strike_price)))
+# if __name__ == "__main__":
+#     with open('config.json') as config_file:
+#         config = json.load(config_file)
+    
+#     bot = TradingBot(config)
+#     asyncio.run(bot.run())
 
-    # Closing the connection pool after the process is done
-    pool = await get_mysql_pool()
-    pool.close()
-    await pool.wait_closed()
 
-# # Run the async main loop
-# asyncio.run(main())
+    async def run_scheduled(self):
+        ist = pytz.timezone('Asia/Kolkata')
+        start_time = time(9, 15)
+        end_time = time(15, 30)
+        
+        while True:
+            now = datetime.now(ist)
+            if start_time <= now.time() <= end_time:
+                if self.is_business_day(now):
+                    logging.info("Starting execution at: %s", now)
+                    await self.run()
+                    logging.info("Execution completed at: %s", now)
+                else:
+                    logging.info("Today is not a business day: %s", now)
+                
+                next_run = (now + timedelta(minutes=1)).replace(second=10, microsecond=0)
+                sleep_duration = (next_run - now).total_seconds()
+                await asyncio.sleep(sleep_duration)
+            else:
+                logging.info("Outside trading hours: %s", now)
+                next_run = (now + timedelta(days=1)).replace(hour=9, minute=15, second=0, microsecond=0)
+                sleep_duration = (next_run - now).total_seconds()
+                await asyncio.sleep(sleep_duration)
+
+    def is_business_day(self, date):
+        return np.is_busday(date.date())  # Simple business day check
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    with open('config.json') as config_file:
+        config = json.load(config_file)
+    
+    bot = TradingBot(config)
+    asyncio.run(bot.run_scheduled())
