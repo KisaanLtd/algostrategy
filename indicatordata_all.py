@@ -1,227 +1,217 @@
-
 import json
-import pandas as pd
-import numpy as np
-import pandas_ta as ta
-from datetime import datetime
-from sqlalchemy import create_engine, Column, Float, DateTime, text
-from sqlalchemy.orm import declarative_base, sessionmaker
+import asyncio
+import aiomysql
 import pytz
+import pandas as pd
+import talib
+import numpy as np
+from datetime import datetime, timedelta
 
-# Load configuration from config.json
-def load_config():
-    """Load configuration from config.json."""
-    with open('config.json', 'r') as file:
-        return json.load(file)
-
-config = load_config()
-
-# Extract configuration details
-db_config = config['db_config']
-tv_username = config['tvdatafeed']['username']
-tv_password = config['tvdatafeed']['password']
-
-# Define the timezone for IST
 IST = pytz.timezone('Asia/Kolkata')
 
-def is_market_open():
-    """Check if the market is currently open."""
-    now = datetime.now(IST)
-    market_open_time = now.replace(hour=9, minute=14, second=0, microsecond=0)
-    market_close_time = now.replace(hour=15, minute=31, second=0, microsecond=0)
-    return market_open_time <= now <= market_close_time
+class IndicatorAllData:
+    def __init__(self, config):
+        self.config = config
 
-def get_sqlalchemy_engine():
-    """Create and return an SQLAlchemy engine."""
-    from urllib.parse import quote_plus
-    user = quote_plus(db_config['user'])
-    password = quote_plus(db_config['password'])
-    host = db_config['host']
-    database = db_config['database']
-    
-    connection_string = f"mysql+mysqlconnector://{user}:{password}@{host}/{database}"
-    return create_engine(connection_string)
+    async def get_mysql_pool(self):
+        db_config = self.config['db_config']
+        pool = await aiomysql.create_pool(
+            host=db_config['host'],
+            port=int(db_config['port']),
+            user=db_config['user'],
+            password=db_config['password'],
+            db=db_config['database'],
+            autocommit=True,
+            minsize=5,
+            maxsize=20
+        )
+        return pool
 
-# Define SQLAlchemy base and models
-Base = declarative_base()
+    def is_market_open(self):
+        current_time = datetime.now(IST).time()
+        open_time = datetime.strptime('09:15', '%H:%M').time()
+        close_time = datetime.strptime('15:30', '%H:%M').time()
+        is_open = open_time <= current_time < close_time
+        print(f"Market open status: {is_open}")
+        return is_open
 
-class OHLCData(Base):
-    __tablename__ = 'ohlctick_data'
-    datetime = Column(DateTime, primary_key=True)
-    open = Column(Float)
-    high = Column(Float)
-    low = Column(Float)
-    close = Column(Float)
-    ohlc4 = Column(Float)
+    def is_business_day(self, date):
+        is_business = date.weekday() < 5 and date.strftime('%Y-%m-%d') not in self.config['holidays']
+        print(f"Date {date.strftime('%Y-%m-%d')} is business day: {is_business}")
+        return is_business
 
-class IndicatorsData(Base):
-    __tablename__ = 'indicators_data'
-    datetime = Column(DateTime, primary_key=True)
-    open = Column(Float)
-    high = Column(Float)
-    low = Column(Float)
-    close = Column(Float)
-    ohlc4 = Column(Float)
-    ohlc4_sma5 = Column(Float)
-    highsma5 = Column(Float)
-    lowsma5 = Column(Float)
-    closesma26 = Column(Float)
-    closesma9 = Column(Float)  # Fixed column name mismatch
-    highsma5_off3 = Column(Float)
-    lowsma5_off3 = Column(Float)
-    ATR = Column(Float)
-    VStop2 = Column(Float)
-    VStop3 = Column(Float)
-    TrendUp2 = Column(Float)
-    TrendUp3 = Column(Float)
-    Max = Column(Float)
-    Min = Column(Float)
-    
-def calculate_additional_indicators(data):
-    """Calculate additional indicators and add them to the DataFrame."""
-    data['ohlc4_sma5'] = ta.sma(data['ohlc4'], length=5)
-    data['highsma5'] = ta.sma(data['high'], length=5)
-    data['lowsma5'] = ta.sma(data['low'], length=5)
-    data['closesma26'] = ta.sma(data['close'], length=26)
-    data['closesma9'] = ta.sma(data['close'], length=9)
-    data['highsma5_off3'] = data['highsma5'].shift(3)
-    data['lowsma5_off3'] = data['lowsma5'].shift(3)
-    
-    # Round the output indicators to two decimal places
-    columns_to_round = ['ohlc4_sma5', 'highsma5', 'lowsma5', 'closesma26', 'closesma9', 'highsma5_off3', 'lowsma5_off3']
-    data[columns_to_round] = data[columns_to_round].round(2)
-    return data
+    def get_sleep_duration(self):
+        current_datetime = datetime.now(IST)
+        current_time = current_datetime.time()
+        next_market_open_datetime = current_datetime.replace(
+            hour=9, minute=15, second=0, microsecond=0)
 
-def calculate_vstop(data):
-    """Calculate VStop indicators from data."""
-    data['ATR'] = ta.atr(data['high'], data['low'], data['close'], length=252)
-    
-   # Initialize columns
-    data['VStop2'] = np.nan
-    data['VStop3'] = np.nan
-    data['TrendUp2'] = 1  # Start with trend up (1)
-    data['TrendUp3'] = 1  # Start with trend up (1)
-    data['Max'] = data['close']
-    data['Min'] = data['close']
+        if current_time >= next_market_open_datetime.time():
+            next_market_open_datetime += timedelta(days=1)
 
-    # Calculate VStop2
-    for i in range(252, len(data)):
-        src = data['close'].iloc[i]
-        atr_m2 = data['ATR'].iloc[i] * 2
-        
-        # Update max and min values
-        data.at[i, 'Max'] = max(data['Max'].iloc[i-1], src)
-        data.at[i, 'Min'] = min(data['Min'].iloc[i-1], src)
-        
-        if data['TrendUp2'].iloc[i-1] == 1:
-            data.at[i, 'VStop2'] = max(
-                data['VStop2'].iloc[i-1] if not np.isnan(data['VStop2'].iloc[i-1]) else src, 
-                data['Max'].iloc[i] - atr_m2
+        while not self.is_business_day(next_market_open_datetime):
+            next_market_open_datetime += timedelta(days=1)
+
+        sleep_duration = (next_market_open_datetime - current_datetime).total_seconds()
+        print(f"Sleep duration until next market open: {sleep_duration} seconds")
+        return sleep_duration
+
+    async def create_tables_if_not_exists(self, pool):
+        create_table_query = '''
+            CREATE TABLE IF NOT EXISTS indicators_data (
+                datetime DATETIME PRIMARY KEY,
+                open DOUBLE,
+                high DOUBLE,
+                low DOUBLE,
+                close DOUBLE,
+                ohlc4 DOUBLE,
+                ohlc4_sma5 DOUBLE,
+                highsma5 DOUBLE,
+                lowsma5 DOUBLE,
+                closesma26 DOUBLE,
+                closesma5 DOUBLE,
+                highsma5_off3 DOUBLE,
+                lowsma5_off3 DOUBLE,
+                KST DOUBLE,
+                KST9 DOUBLE,
+                BuyCall INTEGER,
+                BuyPut INTEGER,
+                ATR DOUBLE,
+                VStop2 DOUBLE,
+                VStop3 DOUBLE,
+                TrendUp2 INTEGER,
+                TrendUp3 INTEGER,
+                Max DOUBLE,
+                Min DOUBLE
             )
-        else:
-            data.at[i, 'VStop2'] = min(
-                data['VStop2'].iloc[i-1] if not np.isnan(data['VStop2'].iloc[i-1]) else src, 
-                data['Min'].iloc[i] + atr_m2
-            )
+        '''
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(create_table_query)
+                print("Tables created if not exist")
+
+    async def fetch_ohlctick_1mdata(self, pool):
+        query = "SELECT * FROM ohlctick_1mdata ORDER BY datetime"
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(query)
+                result = await cur.fetchall()
+                columns = [col[0] for col in cur.description]
+                data = pd.DataFrame(result, columns=columns)
+                data.sort_values(by='datetime', inplace=True)
+                print(f"Fetched OHLC data with {len(data)} rows")
+                return data
+
+    async def calculate_additional_indicators(self, data):
+        data['ohlc4_sma5'] = talib.SMA(data['ohlc4'], timeperiod=5)
+        data['highsma5'] = talib.SMA(data['high'], timeperiod=5)
+        data['lowsma5'] = talib.SMA(data['low'], timeperiod=5)
+        data['closesma26'] = talib.SMA(data['close'], timeperiod=26)
+        data['closesma5'] = talib.SMA(data['close'], timeperiod=5)
+        data['highsma5_off3'] = data['highsma5'].shift(3)
+        data['lowsma5_off3'] = data['lowsma5'].shift(3)
         
-        # Determine trend change
-        data.at[i, 'TrendUp2'] = 1 if src >= data['VStop2'].iloc[i] else 0
+        sma1 = talib.SMA(talib.ROC(data['close'], timeperiod=10), timeperiod=10)
+        sma2 = talib.SMA(talib.ROC(data['close'], timeperiod=15), timeperiod=10)
+        sma3 = talib.SMA(talib.ROC(data['close'], timeperiod=20), timeperiod=10)
+        sma4 = talib.SMA(talib.ROC(data['close'], timeperiod=30), timeperiod=15)
+        data['KST'] = (sma1 + sma2 * 2 + sma3 * 3 + sma4 * 4)
+        data['KST9'] = talib.SMA(data['KST'], timeperiod=9)
+
+        data['BuyCall'] = (data['ohlc4_sma5'] > data['highsma5_off3']).astype(int)
+        data['BuyPut'] = (data['ohlc4_sma5'] < data['lowsma5_off3']).astype(int)
+
+        columns_to_round = ['ohlc4_sma5', 'highsma5', 'lowsma5',
+                            'closesma26', 'closesma5', 'highsma5_off3', 'lowsma5_off3', 'KST', 'KST9']
+        data[columns_to_round] = data[columns_to_round].round(2)
+        print("Calculated additional indicators")
+        return data
+
+    async def calculate_vstop(self, data):
+        data['ATR'] = talib.ATR(data['high'], data['low'], data['close'], timeperiod=252)
+        data['VStop2'] = np.nan
+        data['VStop3'] = np.nan
+        data['TrendUp2'] = True
+        data['TrendUp3'] = True
+        data['Max'] = data['close']
+        data['Min'] = data['close']
+
+        for i in range(252, len(data)):
+            src = data['close'].iloc[i]
+            atr_m2 = data['ATR'].iloc[i] * 2
+            atr_m3 = data['ATR'].iloc[i] * 3
+
+            data.at[i, 'Max'] = max(data['Max'].iloc[i-1], src)
+            data.at[i, 'Min'] = min(data['Min'].iloc[i-1], src)
+
+            if data['TrendUp2'].iloc[i-1]:
+                data.at[i, 'VStop2'] = max(data['VStop2'].iloc[i-1] if not np.isnan(data['VStop2'].iloc[i-1]) else src, data['Max'].iloc[i] - atr_m2)
+            else:
+                data.at[i, 'VStop2'] = min(data['VStop2'].iloc[i-1] if not np.isnan(data['VStop2'].iloc[i-1]) else src, data['Min'].iloc[i] + atr_m2)
+
+            data.at[i, 'TrendUp2'] = src >= data['VStop2'].iloc[i]
+
+            if data['TrendUp2'].iloc[i] != data['TrendUp2'].iloc[i-1]:
+                data.at[i, 'Max'] = src
+                data.at[i, 'Min'] = src
+                data.at[i, 'VStop2'] = data['Max'].iloc[i] - atr_m2 if data['TrendUp2'].iloc[i] else data['Min'].iloc[i] + atr_m2
+
+            if data['TrendUp3'].iloc[i-1]:
+                data.at[i, 'VStop3'] = max(data['VStop3'].iloc[i-1] if not np.isnan(data['VStop3'].iloc[i-1]) else src, data['Max'].iloc[i] - atr_m3)
+            else:
+                data.at[i, 'VStop3'] = min(data['VStop3'].iloc[i-1] if not np.isnan(data['VStop3'].iloc[i-1]) else src, data['Min'].iloc[i] + atr_m3)
+
+            data.at[i, 'TrendUp3'] = src >= data['VStop3'].iloc[i]
+
+            if data['TrendUp3'].iloc[i] != data['TrendUp3'].iloc[i-1]:
+                data.at[i, 'Max'] = src
+                data.at[i, 'Min'] = src
+                data.at[i, 'VStop3'] = data['Max'].iloc[i] - atr_m3 if data['TrendUp3'].iloc[i] else data['Min'].iloc[i] + atr_m3
+
+        columns_to_round = ['ATR', 'VStop2', 'VStop3']
+        data[columns_to_round] = data[columns_to_round].round(2)
+        return data
+
+    async def save_indicators_to_db(self, pool, data):
+        data = [[None if pd.isna(x) else x for x in row] for row in data]
         
-        if data['TrendUp2'].iloc[i] != data['TrendUp2'].iloc[i-1]:
-            data.at[i, 'Max'] = src
-            data.at[i, 'Min'] = src
-            data.at[i, 'VStop2'] = data['Max'].iloc[i] - atr_m2 if data['TrendUp2'].iloc[i] == 1 else data['Min'].iloc[i] + atr_m2
+        replace_query = '''
+            REPLACE INTO indicators_data (
+                datetime, open, high, low, close, ohlc4, ohlc4_sma5, highsma5, lowsma5, closesma26, closesma5, 
+                highsma5_off3, lowsma5_off3, KST, KST9, BuyCall, BuyPut, ATR, VStop2, VStop3, TrendUp2, TrendUp3, Max, Min
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        '''
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                # await cur.executemany(replace_query, non_zero_data)
+                # print(f"Inserted {len(non_zero_data)} rows into the database")
+                await cur.executemany(replace_query, data)
+                print(f"Inserted {len(data)} rows into the database")
+
+    async def get_signal(self):
+        pool = await self.get_mysql_pool()  # Await the pool creation
+        try:
+            await self.create_tables_if_not_exists(pool)
+            ohlc_data = await self.fetch_ohlctick_1mdata(pool)
+            if len(ohlc_data) < 252:
+                print("Not enough data to calculate indicators")
+                return
+
+            # ohlc_data['ohlc4'] = ohlc_data[['open', 'high', 'low', 'close']].mean(axis=1)
+            indicator_data = await self.calculate_additional_indicators(ohlc_data)
+            indicator_data = await self.calculate_vstop(indicator_data)
+            # print(indicator_data.columns)
+            await self.save_indicators_to_db(pool, indicator_data.to_numpy())
+        finally:
+            pool.close()  # Close the pool after usage
+            await pool.wait_closed()  # Wait until the pool is fully closed
     
-    # Reset Max and Min values for second calculation
-    data['Max'] = data['close']
-    data['Min'] = data['close']
-    
-    # Calculate VStop3
-    for i in range(252, len(data)):
-        src = data['close'].iloc[i]
-        atr_m3 = data['ATR'].iloc[i] * 3
-        
-        # Update max and min values
-        data.at[i, 'Max'] = max(data['Max'].iloc[i-1], src)
-        data.at[i, 'Min'] = min(data['Min'].iloc[i-1], src)
-        
-        if data['TrendUp3'].iloc[i-1] == 1:
-            data.at[i, 'VStop3'] = max(
-                data['VStop3'].iloc[i-1] if not np.isnan(data['VStop3'].iloc[i-1]) else src, 
-                data['Max'].iloc[i] - atr_m3
-            )
-        else:
-            data.at[i, 'VStop3'] = min(
-                data['VStop3'].iloc[i-1] if not np.isnan(data['VStop3'].iloc[i-1]) else src, 
-                data['Min'].iloc[i] + atr_m3
-            )
-        
-        # Determine trend change
-        data.at[i, 'TrendUp3'] = 1 if src >= data['VStop3'].iloc[i] else 0
-        
-        if data['TrendUp3'].iloc[i] != data['TrendUp3'].iloc[i-1]:
-            data.at[i, 'Max'] = src
-            data.at[i, 'Min'] = src
-            data.at[i, 'VStop3'] = data['Max'].iloc[i] - atr_m3 if data['TrendUp3'].iloc[i] == 1 else data['Min'].iloc[i] + atr_m3
-
-    # Round the output indicators to two decimal places
-    columns_to_round = ['ATR', 'VStop2', 'VStop3']
-    data[columns_to_round] = data[columns_to_round].round(2)
-
-    return data
-
-def vstop():
-    """
-    Fetch, calculate, and update indicators.
-    """
-    engine = get_sqlalchemy_engine()
-    Session = sessionmaker(bind=engine)
-    session = Session()
-    
-    # Fetch the latest datetime from ohlctick_data
-    def fetch_latest_datetime(table_name):
-        with engine.connect() as conn:
-            query = text(f"SELECT MAX(datetime) AS latest_datetime FROM {table_name}")
-            result = conn.execute(query).fetchone()
-            return result[0] if result else None
-
-    latest_datetime_ohlctick = fetch_latest_datetime('ohlctick_data')
-    
-    if not latest_datetime_ohlctick:
-        print("No data in ohlctick_data. Exiting.")
-        return
-    
-    # Fetch all data from ohlctick_data
-    query = "SELECT * FROM ohlctick_data"
-    with engine.connect() as conn:
-        data = pd.read_sql_query(query, conn)
-    
-    if data.empty:
-        print("No data retrieved from ohlctick_data. Exiting.")
-        return
-    
-    # Convert columns to numeric
-    data['high'] = pd.to_numeric(data['high'], errors='coerce')
-    data['low'] = pd.to_numeric(data['low'], errors='coerce')
-    data['close'] = pd.to_numeric(data['close'], errors='coerce')
-    data['datetime'] = pd.to_datetime(data['datetime'], errors='coerce')
-
-    # Drop rows with NaN values in crucial columns
-    data = data.dropna(subset=['high', 'low', 'close'])
-
-    # Calculate additional indicators
-    data = calculate_additional_indicators(data)
-
-    # Calculate VStop indicators
-    data = calculate_vstop(data)
-
-    # Filter to keep the latest
-    data = data.sort_values('datetime', ascending=False)
-
-    # Save the updated data back to the database
-    with engine.connect() as conn:
-        data.to_sql('indicators_data', conn, if_exists='replace', index=False)
-    print("Indicators All data updated.")
+    async def main(self):
+        await self.get_signal()
 
 if __name__ == "__main__":
-    vstop()
+    with open('config.json') as config_file:
+        config = json.load(config_file)
+
+    indicator_alldata = IndicatorAllData(config)
+    asyncio.run(indicator_alldata.main())
