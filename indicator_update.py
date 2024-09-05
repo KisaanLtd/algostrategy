@@ -73,7 +73,7 @@ class IndicatorUpdate:
                 highsma5_off3 DOUBLE,
                 lowsma5_off3 DOUBLE,
                 KST DOUBLE,
-                KST9 DOUBLE,
+                KST26 DOUBLE,
                 BuyCall INTEGER,
                 BuyPut INTEGER,
                 ATR DOUBLE,
@@ -111,18 +111,18 @@ class IndicatorUpdate:
         data['highsma5_off3'] = data['highsma5'].shift(3)
         data['lowsma5_off3'] = data['lowsma5'].shift(3)
         
-        sma1 = talib.SMA(talib.ROC(data['close'], timeperiod=10), timeperiod=10)
-        sma2 = talib.SMA(talib.ROC(data['close'], timeperiod=15), timeperiod=10)
-        sma3 = talib.SMA(talib.ROC(data['close'], timeperiod=20), timeperiod=10)
-        sma4 = talib.SMA(talib.ROC(data['close'], timeperiod=30), timeperiod=15)
+        sma1 = talib.SMA(talib.ROC(data['close'], timeperiod=20), timeperiod=20)
+        sma2 = talib.SMA(talib.ROC(data['close'], timeperiod=30), timeperiod=20)
+        sma3 = talib.SMA(talib.ROC(data['close'], timeperiod=40), timeperiod=20)
+        sma4 = talib.SMA(talib.ROC(data['close'], timeperiod=60), timeperiod=30)
         data['KST'] = (sma1 + sma2 * 2 + sma3 * 3 + sma4 * 4)
-        data['KST9'] = talib.SMA(data['KST'], timeperiod=9)
+        data['KST26'] = talib.SMA(data['KST'], timeperiod=26)
 
-        data['BuyCall'] = (data['ohlc4_sma5'] > data['highsma5_off3']).astype(int)
-        data['BuyPut'] = (data['ohlc4_sma5'] < data['lowsma5_off3']).astype(int)
+        data['BuyCall'] = (data['KST'] > data['KST26']).astype(int)
+        data['BuyPut'] = (data['KST'] < data['KST26']).astype(int)
 
         columns_to_round = ['ohlc4_sma5', 'highsma5', 'lowsma5',
-                            'closesma26', 'closesma5', 'highsma5_off3', 'lowsma5_off3', 'KST', 'KST9']
+                            'closesma26', 'closesma5', 'highsma5_off3', 'lowsma5_off3', 'KST', 'KST26']
         data[columns_to_round] = data[columns_to_round].round(2)
         print("Calculated additional indicators")
         return data
@@ -180,7 +180,7 @@ class IndicatorUpdate:
         replace_query = '''
             REPLACE INTO indicators_data (
                 datetime, open, high, low, close, ohlc4, ohlc4_sma5, highsma5, lowsma5, closesma26, closesma5, 
-                highsma5_off3, lowsma5_off3, KST, KST9, BuyCall, BuyPut, ATR, VStop2, VStop3, TrendUp2, TrendUp3, Max, Min
+                highsma5_off3, lowsma5_off3, KST, KST26, BuyCall, BuyPut, ATR, VStop2, VStop3, TrendUp2, TrendUp3, Max, Min
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         '''
         async with pool.acquire() as conn:
