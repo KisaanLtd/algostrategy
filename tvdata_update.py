@@ -3,10 +3,9 @@ import pandas as pd
 import json
 import asyncio
 import aiomysql
-import pytz
+import numpy as np
 from datetime import datetime, time, timedelta
 
-IST = pytz.timezone('Asia/Kolkata')
 
 class TvDataUpdate:
     def __init__(self, config):
@@ -28,49 +27,34 @@ class TvDataUpdate:
             maxsize=20
         )
         return pool
-    def is_market_open(self):
-        current_time = datetime.now(IST).time()
-        open_time = datetime.strptime('09:15', '%H:%M').time()
-        close_time = datetime.strptime('15:30', '%H:%M').time()
-        is_open = open_time <= current_time < close_time
-        print(f"Market open status: {is_open}")
-        return is_open
 
-    def is_business_day(self, date):
-        is_business = date.weekday() < 5 and date.strftime('%Y-%m-%d') not in self.config['holidays']
-        print(f"Date {date.strftime('%Y-%m-%d')} is business day: {is_business}")
-        return is_business
+    async def fetch_ohlctick_data(self, pool):
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                query = 'SELECT * FROM ohlctick_1mdata ORDER BY datetime'
+                await cur.execute(query)
+                data = await cur.fetchall()
+                df = pd.DataFrame(
+                    data, columns=['datetime', 'open', 'high', 'low', 'close', 'ohlc4'])
+                df['datetime'] = pd.to_datetime(df['datetime'])
+                df.sort_values(by='datetime', inplace=True)
+                return df
 
-    def get_sleep_duration(self):
-        current_datetime = datetime.now(IST)
-        current_time = current_datetime.time()
-        next_market_open_datetime = current_datetime.replace(
-            hour=9, minute=15, second=0, microsecond=0)
-
-        if current_time >= next_market_open_datetime.time():
-            next_market_open_datetime += timedelta(days=1)
-
-        while not self.is_business_day(next_market_open_datetime):
-            next_market_open_datetime += timedelta(days=1)
-
-        sleep_duration = (next_market_open_datetime - current_datetime).total_seconds()
-        print(f"Sleep duration until next market open: {sleep_duration} seconds")
-        return sleep_duration
     async def create_tables_if_not_exists(self, pool):
         async with pool.acquire() as conn:
             async with conn.cursor() as cursor:
-                create_table_query = '''
-                CREATE TABLE IF NOT EXISTS ohlctick_1mdata (
-                    datetime DATETIME PRIMARY KEY,
-                    open FLOAT,
-                    high FLOAT,
-                    low FLOAT,
-                    close FLOAT,
-                    ohlc4 FLOAT
-                )
-                '''
+                create_table_query = '''CREATE TABLE IF NOT EXISTS ohlctick_1mdata (
+                datetime DATETIME,
+                open FLOAT,
+                high FLOAT,
+                low FLOAT,
+                close FLOAT,
+                ohlc4 FLOAT,
+                PRIMARY KEY (datetime)
+            )'''
                 await cursor.execute(create_table_query)
             await conn.commit()
+
     async def check_missing_or_duplicate_keys(self, pool):
         now = pd.Timestamp.now()
         market_open_time = datetime.combine(now.date(), time(9, 15))
@@ -114,22 +98,25 @@ class TvDataUpdate:
                 else:
                     print("No gaps or duplicates found.")
                 return num_issues
-    async def save_indicators_to_db(self, pool, data):
-        # Handle NaN values and filter rows with zeroes in specified columns
-        data = [[None if pd.isna(x) else x for x in row] for row in data]
-        non_zero_data = [
-            row for row in data if all(row[i] != 0 for i in [1, 2, 3, 4])
-        ]
 
-        replace_query = '''
-            REPLACE INTO ohlctick_1mdata (
-                datetime, open, high, low, close, ohlc4
-            ) VALUES (%s, %s, %s, %s, %s, %s)
-        '''
+    async def insert_tick_dataframe(self, pool, tick_df):
         async with pool.acquire() as conn:
-            async with conn.cursor() as cur:
-                await cur.executemany(replace_query, non_zero_data)
-                print(f"Inserted {len(non_zero_data)} rows into the database")
+            async with conn.cursor() as cursor:
+                try:
+                    insert_query = '''REPLACE INTO ohlctick_1mdata (datetime, open, high, low, close, ohlc4)
+                    VALUES (%s, %s, %s, %s, %s, %s)'''
+                    records = tick_df.to_dict(orient='records')
+                    for record in records:
+                        await cursor.execute(insert_query, (
+                            record['datetime'], record['open'], record['high'],
+                            record['low'], record['close'], record['ohlc4']
+                        ))
+                    await conn.commit()
+                    print(
+                        f"Successfully inserted/updated {len(records)} rows into the database.")
+                except Exception as e:
+                    print(f"Error inserting data into database: {e}")
+                    await conn.rollback()
 
     async def fetch_tv_data(self):
         tv = TvDatafeed()  # Use without login
@@ -164,14 +151,17 @@ class TvDataUpdate:
             print(f"Error fetching TV data: {e}")
             return pd.DataFrame()
 
-    # async def run(self):
-    #     pool = await self.get_mysql_pool()
-    #     await self.create_tables_if_not_exists(pool)
-    #     tick_df = await self.fetch_tv_data()
-    #     if not tick_df.empty:
-    #         await self.save_indicators_to_db(pool, tick_df.to_numpy())
-    #     pool.close()
-    #     await pool.wait_closed()
+    def is_market_open(self):
+        now = pd.Timestamp.now()
+        market_open_time = now.replace(
+            hour=9, minute=15, second=0, microsecond=0)
+        market_close_time = now.replace(
+            hour=15, minute=30, second=0, microsecond=0)
+        return market_open_time <= now <= market_close_time
+
+    def is_business_day(self, date):
+        return np.is_busday(date.date())  # Simple business day check
+
     async def run(self):
         pool = await self.get_mysql_pool()
         try:
@@ -183,7 +173,7 @@ class TvDataUpdate:
                         if num_issues:
                             tick_df = await self.fetch_tv_data()
                             if not tick_df.empty:
-                                await self.save_indicators_to_db(pool, tick_df.to_numpy())
+                                await self.insert_tick_dataframe(pool, tick_df)
                         current_time = pd.Timestamp.now()
                         period_now = pd.Period.now('1T')
                         period_now_start_time = period_now.start_time
@@ -192,22 +182,21 @@ class TvDataUpdate:
                         sleep_duration = (next_execution - current_time).total_seconds()
                         await asyncio.sleep(sleep_duration)
                 else:
-                    # now = pd.Timestamp.now()
-                    # next_market_open = datetime.combine(
-                    #     now.date(), time(9, 15))
-                    # if now.time() > time(15, 30):
-                    #     next_market_open += timedelta(days=1)
-                    # time_until_open = (next_market_open - now).total_seconds()
-                    time_until_open = self.get_sleep_duration()
-                
-                    print(f"Market closed. Sleeping for {time_until_open} seconds.")
+                    now = pd.Timestamp.now()
+                    next_market_open = datetime.combine(
+                        now.date(), time(9, 15))
+                    if now.time() > time(15, 30):
+                        next_market_open += timedelta(days=1)
+                    time_until_open = (next_market_open - now).total_seconds()
+                    print(
+                        f"Market closed. Sleeping for {time_until_open} seconds.")
                     await asyncio.sleep(time_until_open)
-                    # await asyncio.sleep(time_until_open)
         except KeyboardInterrupt:
             print("Process interrupted")
         finally:
             pool.close()
             await pool.wait_closed()
+
 
 if __name__ == "__main__":
     with open('config.json') as config_file:
