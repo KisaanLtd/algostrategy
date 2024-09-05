@@ -5,7 +5,7 @@
     "api_session": "45792206",
     "db_config": {
         "host": "localhost",
-        "user": "myalgo",
+        "user": "myalgodbadmin",
         "password": "7878@password",
         "database": "mbanknifty"
     },
