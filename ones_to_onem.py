@@ -9,6 +9,7 @@ from breeze_connect import BreezeConnect
 
 IST = pytz.timezone('Asia/Kolkata')
 
+
 class OnesToOnem:
     def __init__(self, config):
         self.config = config
@@ -76,7 +77,8 @@ class OnesToOnem:
                     for record in records:
                         datetime_value = record['datetime']
                         if isinstance(datetime_value, str):
-                            datetime_value = pd.to_datetime(datetime_value, errors='coerce')
+                            datetime_value = pd.to_datetime(
+                                datetime_value, errors='coerce')
                         await cur.execute(insert_query, (
                             datetime_value, record['open'], record['high'],
                             record['low'], record['close'], record['ohlc4']
@@ -91,9 +93,11 @@ class OnesToOnem:
             now = datetime.now(IST)
             market_open_time = datetime.combine(now.date(), time(9, 15))
             market_close_time = datetime.combine(now.date(), time(15, 30))
-            period_now = pd.Period.now('1T')
-            open_time_datetime64 = pd.Period(market_open_time, '1T').start_time
-            close_time_datetime64 = pd.Period(market_close_time, '1T').end_time
+            period_now = pd.Period.now('1min')
+            open_time_datetime64 = pd.Period(
+                market_open_time, '1min').start_time
+            close_time_datetime64 = pd.Period(
+                market_close_time, '1min').end_time
             period_now_datetime64 = period_now.start_time
             min_datetime = min(close_time_datetime64, period_now_datetime64)
 
@@ -105,12 +109,14 @@ class OnesToOnem:
                     columns = [desc[0] for desc in cur.description]
 
                     ohlc_1s_df = pd.DataFrame(data, columns=columns)
-                    ohlc_1s_df['datetime'] = pd.to_datetime(ohlc_1s_df['datetime'], errors='coerce')
+                    ohlc_1s_df['datetime'] = pd.to_datetime(
+                        ohlc_1s_df['datetime'], errors='coerce')
                     ohlc_1s_df.set_index('datetime', inplace=True)
-                    
-                    period_index = pd.date_range(start=open_time_datetime64, end=min_datetime, freq='S')
+
+                    period_index = pd.date_range(
+                        start=open_time_datetime64, end=min_datetime, freq='s')
                     ohlc_1s_df = ohlc_1s_df.reindex(period_index)
-                    
+
                     ohlc_dict = {
                         'open': 'first',
                         'high': 'max',
@@ -119,7 +125,8 @@ class OnesToOnem:
                         'ohlc4': 'mean'
                     }
 
-                    ohlc_1m_df = ohlc_1s_df.resample('1T', closed='left', label='left').agg(ohlc_dict).reset_index()
+                    ohlc_1m_df = ohlc_1s_df.resample(
+                        '1min', closed='left', label='left').agg(ohlc_dict).reset_index()
                     ohlc_1m_df.fillna({
                         'open': 0.0,
                         'high': 0.0,
@@ -127,7 +134,8 @@ class OnesToOnem:
                         'close': 0.0,
                         'ohlc4': 0.0
                     }, inplace=True)
-                    ohlc_1m_df.rename(columns={'index': 'datetime'}, inplace=True)
+                    ohlc_1m_df.rename(
+                        columns={'index': 'datetime'}, inplace=True)
                     ohlc_1m_df['ohlc4'] = ohlc_1m_df['ohlc4'].round(2)
                     two_rows = ohlc_1m_df.tail(2)
                     await self.insert_tick_dataframe(pool, 'ohlctick_1mdata', two_rows)
@@ -140,17 +148,21 @@ class OnesToOnem:
                 tick = [tick]
             tick_df = pd.DataFrame(tick)
             if 'datetime' in tick_df.columns:
-                tick_df['datetime'] = pd.to_datetime(tick_df['datetime'], errors='coerce')
+                tick_df['datetime'] = pd.to_datetime(
+                    tick_df['datetime'], errors='coerce')
             else:
-                raise ValueError("'datetime' column is missing in the tick data")
+                raise ValueError(
+                    "'datetime' column is missing in the tick data")
 
             for col in ['open', 'high', 'low', 'close']:
                 tick_df[col] = pd.to_numeric(tick_df[col], errors='coerce')
 
             if all(col in tick_df.columns for col in ['open', 'high', 'low', 'close']):
-                tick_df['ohlc4'] = (tick_df['open'] + tick_df['high'] + tick_df['low'] + tick_df['close']) / 4
+                tick_df['ohlc4'] = (
+                    tick_df['open'] + tick_df['high'] + tick_df['low'] + tick_df['close']) / 4
                 tick_df['ohlc4'] = tick_df['ohlc4'].round(2)
-                selected_columns = ['datetime', 'open', 'high', 'low', 'close', 'ohlc4']
+                selected_columns = ['datetime', 'open',
+                                    'high', 'low', 'close', 'ohlc4']
                 tick_df = tick_df[selected_columns]
                 pool = await self.get_mysql_pool()
                 await self.insert_tick_dataframe(pool, 'ohlctick_1sdata', tick_df)
@@ -168,12 +180,14 @@ class OnesToOnem:
         print("Connecting to WebSocket...")
         self.api.ws_connect()
         self.api.on_ticks = self.async_on_ticks
-        self.api.subscribe_feeds(stock_token='4.1!NIFTY BANK', interval="1second")
+        self.api.subscribe_feeds(
+            stock_token='4.1!NIFTY BANK', interval="1second")
         print("Subscribed to data feed")
 
     async def disconnect_from_websocket(self):
         print("Unsubscribing from data feed...")
-        self.api.unsubscribe_feeds(stock_token='4.1!NIFTY BANK', interval="1second")
+        self.api.unsubscribe_feeds(
+            stock_token='4.1!NIFTY BANK', interval="1second")
         disconnected = self.api.ws_disconnect()
         if disconnected:
             print("WebSocket disconnected")
@@ -186,8 +200,10 @@ class OnesToOnem:
     def is_market_open(self):
         # now = pd.Timestamp.now(IST)
         now = datetime.now(IST)
-        market_open_time = datetime.combine(now.date(), time(9, 15)).replace(tzinfo=IST)
-        market_close_time = datetime.combine(now.date(), time(15, 30)).replace(tzinfo=IST)
+        market_open_time = datetime.combine(
+            now.date(), time(9, 15)).replace(tzinfo=IST)
+        market_close_time = datetime.combine(
+            now.date(), time(15, 30)).replace(tzinfo=IST)
         return market_open_time <= now <= market_close_time
 
     async def run(self):
@@ -202,24 +218,30 @@ class OnesToOnem:
                         await self.fetch_and_resample_data(pool)
                         # current_time = pd.Timestamp.now(IST)
                         current_time = datetime.now(IST)
-                        period_now = pd.Period.now('1T')
-                        period_now_start_time = period_now.start_time.replace(tzinfo=IST)
-                        next_execution = (period_now_start_time + pd.Timedelta(seconds=61))
-                        sleep_duration = (next_execution - current_time).total_seconds()
+                        period_now = pd.Period.now('1min')
+                        period_now_start_time = period_now.start_time.replace(
+                            tzinfo=IST)
+                        next_execution = (
+                            period_now_start_time + pd.Timedelta(seconds=61))
+                        sleep_duration = (
+                            next_execution - current_time).total_seconds()
                         await asyncio.sleep(sleep_duration)
                     await self.disconnect_from_websocket()
                 else:
                     now = datetime.now(IST)
-                    next_market_open =(now + timedelta(days=1)).replace(hour=9, minute=15, second=0, microsecond=0)
+                    next_market_open = (
+                        now + timedelta(days=1)).replace(hour=9, minute=15, second=0, microsecond=0)
                     # sleep_duration = (next_market_open - now).total_seconds()
                     time_until_open = (next_market_open - now).total_seconds()
-                    print(f"Market closed. Sleeping for {time_until_open} seconds.")
+                    print(
+                        f"Market closed. Sleeping for {time_until_open} seconds.")
                     await asyncio.sleep(time_until_open)
         except Exception as e:
             print(f"Error in run loop: {e}")
         finally:
             pool.close()
             await pool.wait_closed()
+
 
 if __name__ == "__main__":
     with open('config.json') as config_file:

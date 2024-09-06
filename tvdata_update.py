@@ -59,9 +59,9 @@ class TvDataUpdate:
         now = pd.Timestamp.now()
         market_open_time = datetime.combine(now.date(), time(9, 15))
         market_close_time = datetime.combine(now.date(), time(15, 28))
-        period_now = pd.Period.now('1T')
-        open_time_datetime64 = pd.Period(market_open_time, '1T').start_time
-        close_time_datetime64 = pd.Period(market_close_time, '1T').end_time
+        period_now = pd.Period.now('1min')
+        open_time_datetime64 = pd.Period(market_open_time, '1min').start_time
+        close_time_datetime64 = pd.Period(market_close_time, '1min').end_time
         period_now_datetime64 = period_now.start_time - pd.Timedelta(minutes=1)
         # period_now_datetime64 = period_now.end_time - pd.Timedelta(minutes=1)
         min_datetime = min(close_time_datetime64, period_now_datetime64)
@@ -175,11 +175,13 @@ class TvDataUpdate:
                             if not tick_df.empty:
                                 await self.insert_tick_dataframe(pool, tick_df)
                         current_time = pd.Timestamp.now()
-                        period_now = pd.Period.now('1T')
+                        period_now = pd.Period.now('1min')
                         period_now_start_time = period_now.start_time
                         # next_execution = (period_now_start_time + pd.Timedelta(seconds=61))
-                        next_execution = (period_now.end_time + pd.Timedelta(seconds=6))
-                        sleep_duration = (next_execution - current_time).total_seconds()
+                        next_execution = (
+                            period_now.end_time + pd.Timedelta(seconds=6))
+                        sleep_duration = (
+                            next_execution - current_time).total_seconds()
                         await asyncio.sleep(sleep_duration)
                 else:
                     now = pd.Timestamp.now()

@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 
 IST = pytz.timezone('Asia/Kolkata')
 
+
 class IndicatorUpdate:
     def __init__(self, config):
         self.config = config
@@ -36,7 +37,8 @@ class IndicatorUpdate:
         return is_open
 
     def is_business_day(self, date):
-        is_business = date.weekday() < 5 and date.strftime('%Y-%m-%d') not in self.config['holidays']
+        is_business = date.weekday() < 5 and date.strftime(
+            '%Y-%m-%d') not in self.config['holidays']
         print(f"Date {date.strftime('%Y-%m-%d')} is business day: {is_business}")
         return is_business
 
@@ -52,8 +54,10 @@ class IndicatorUpdate:
         while not self.is_business_day(next_market_open_datetime):
             next_market_open_datetime += timedelta(days=1)
 
-        sleep_duration = (next_market_open_datetime - current_datetime).total_seconds()
-        print(f"Sleep duration until next market open: {sleep_duration} seconds")
+        sleep_duration = (next_market_open_datetime -
+                          current_datetime).total_seconds()
+        print(
+            f"Sleep duration until next market open: {sleep_duration} seconds")
         return sleep_duration
 
     async def create_tables_if_not_exists(self, pool):
@@ -110,11 +114,15 @@ class IndicatorUpdate:
         data['closesma5'] = talib.SMA(data['close'], timeperiod=5)
         data['highsma5_off3'] = data['highsma5'].shift(3)
         data['lowsma5_off3'] = data['lowsma5'].shift(3)
-        
-        sma1 = talib.SMA(talib.ROC(data['close'], timeperiod=20), timeperiod=20)
-        sma2 = talib.SMA(talib.ROC(data['close'], timeperiod=30), timeperiod=20)
-        sma3 = talib.SMA(talib.ROC(data['close'], timeperiod=40), timeperiod=20)
-        sma4 = talib.SMA(talib.ROC(data['close'], timeperiod=60), timeperiod=30)
+
+        sma1 = talib.SMA(
+            talib.ROC(data['close'], timeperiod=20), timeperiod=20)
+        sma2 = talib.SMA(
+            talib.ROC(data['close'], timeperiod=30), timeperiod=20)
+        sma3 = talib.SMA(
+            talib.ROC(data['close'], timeperiod=40), timeperiod=20)
+        sma4 = talib.SMA(
+            talib.ROC(data['close'], timeperiod=60), timeperiod=30)
         data['KST'] = (sma1 + sma2 * 2 + sma3 * 3 + sma4 * 4)
         data['KST26'] = talib.SMA(data['KST'], timeperiod=26)
 
@@ -128,7 +136,8 @@ class IndicatorUpdate:
         return data
 
     async def calculate_vstop(self, data):
-        data['ATR'] = talib.ATR(data['high'], data['low'], data['close'], timeperiod=252)
+        data['ATR'] = talib.ATR(data['high'], data['low'],
+                                data['close'], timeperiod=252)
         data['VStop2'] = np.nan
         data['VStop3'] = np.nan
         data['TrendUp2'] = True
@@ -145,28 +154,34 @@ class IndicatorUpdate:
             data.at[i, 'Min'] = min(data['Min'].iloc[i-1], src)
 
             if data['TrendUp2'].iloc[i-1]:
-                data.at[i, 'VStop2'] = max(data['VStop2'].iloc[i-1] if not np.isnan(data['VStop2'].iloc[i-1]) else src, data['Max'].iloc[i] - atr_m2)
+                data.at[i, 'VStop2'] = max(data['VStop2'].iloc[i-1] if not np.isnan(
+                    data['VStop2'].iloc[i-1]) else src, data['Max'].iloc[i] - atr_m2)
             else:
-                data.at[i, 'VStop2'] = min(data['VStop2'].iloc[i-1] if not np.isnan(data['VStop2'].iloc[i-1]) else src, data['Min'].iloc[i] + atr_m2)
+                data.at[i, 'VStop2'] = min(data['VStop2'].iloc[i-1] if not np.isnan(
+                    data['VStop2'].iloc[i-1]) else src, data['Min'].iloc[i] + atr_m2)
 
             data.at[i, 'TrendUp2'] = src >= data['VStop2'].iloc[i]
 
             if data['TrendUp2'].iloc[i] != data['TrendUp2'].iloc[i-1]:
                 data.at[i, 'Max'] = src
                 data.at[i, 'Min'] = src
-                data.at[i, 'VStop2'] = data['Max'].iloc[i] - atr_m2 if data['TrendUp2'].iloc[i] else data['Min'].iloc[i] + atr_m2
+                data.at[i, 'VStop2'] = data['Max'].iloc[i] - \
+                    atr_m2 if data['TrendUp2'].iloc[i] else data['Min'].iloc[i] + atr_m2
 
             if data['TrendUp3'].iloc[i-1]:
-                data.at[i, 'VStop3'] = max(data['VStop3'].iloc[i-1] if not np.isnan(data['VStop3'].iloc[i-1]) else src, data['Max'].iloc[i] - atr_m3)
+                data.at[i, 'VStop3'] = max(data['VStop3'].iloc[i-1] if not np.isnan(
+                    data['VStop3'].iloc[i-1]) else src, data['Max'].iloc[i] - atr_m3)
             else:
-                data.at[i, 'VStop3'] = min(data['VStop3'].iloc[i-1] if not np.isnan(data['VStop3'].iloc[i-1]) else src, data['Min'].iloc[i] + atr_m3)
+                data.at[i, 'VStop3'] = min(data['VStop3'].iloc[i-1] if not np.isnan(
+                    data['VStop3'].iloc[i-1]) else src, data['Min'].iloc[i] + atr_m3)
 
             data.at[i, 'TrendUp3'] = src >= data['VStop3'].iloc[i]
 
             if data['TrendUp3'].iloc[i] != data['TrendUp3'].iloc[i-1]:
                 data.at[i, 'Max'] = src
                 data.at[i, 'Min'] = src
-                data.at[i, 'VStop3'] = data['Max'].iloc[i] - atr_m3 if data['TrendUp3'].iloc[i] else data['Min'].iloc[i] + atr_m3
+                data.at[i, 'VStop3'] = data['Max'].iloc[i] - \
+                    atr_m3 if data['TrendUp3'].iloc[i] else data['Min'].iloc[i] + atr_m3
 
         columns_to_round = ['ATR', 'VStop2', 'VStop3']
         data[columns_to_round] = data[columns_to_round].round(2)
@@ -174,9 +189,10 @@ class IndicatorUpdate:
 
     async def save_indicators_to_db(self, pool, data):
         data = [[None if pd.isna(x) else x for x in row] for row in data]
-        non_zero_data = [row for row in data if any(row[i] not in (0, None) for i in [1, 2, 3, 4])]
+        non_zero_data = [row for row in data if any(
+            row[i] not in (0, None) for i in [1, 2, 3, 4])]
         non_zero_data = non_zero_data[-min(len(non_zero_data), 10):]
-        
+
         replace_query = '''
             REPLACE INTO indicators_data (
                 datetime, open, high, low, close, ohlc4, ohlc4_sma5, highsma5, lowsma5, closesma26, closesma5, 
@@ -205,21 +221,23 @@ class IndicatorUpdate:
             pool.close()  # Close the pool after usage
             await pool.wait_closed()  # Wait until the pool is fully closed
 
-
     async def main(self):
         while True:
             if self.is_market_open() and self.is_business_day(datetime.now(IST)):
                 await self.get_signal()
                 current_time = datetime.now(IST)
-                period_now = pd.Period.now('1T')
-                period_now_start_time = period_now.start_time.replace(tzinfo=IST)
-                next_execution = (period_now_start_time + pd.Timedelta(seconds=61))
+                period_now = pd.Period.now('1min')
+                period_now_start_time = period_now.start_time.replace(
+                    tzinfo=IST)
+                next_execution = (period_now_start_time +
+                                  pd.Timedelta(seconds=61))
                 sleep_till = (next_execution - current_time).total_seconds()
                 await asyncio.sleep(sleep_till)
                 # await asyncio.sleep(60)
             else:
                 sleep_duration = self.get_sleep_duration()
                 await asyncio.sleep(sleep_duration)
+
 
 if __name__ == "__main__":
     with open('config.json') as config_file:
