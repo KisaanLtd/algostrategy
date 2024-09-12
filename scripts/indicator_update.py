@@ -114,8 +114,9 @@ class IndicatorUpdate:
         # period_now_datetime64 = period_now.start_time - pd.Timedelta(minutes=1)
         period_now_datetime64 = period_now.start_time
         # next_period_start = (period_now + 1).start_time
-        sleep_duration = (period_now_datetime64 - now).total_seconds()
-        if sleep_duration > 0:
+        # sleep_duration = (period_now_datetime64 - now).total_seconds()
+        sleep_duration = (now - period_now_datetime64).total_seconds()
+        if sleep_duration > 0 and sleep_duration < 60:
             min_datetime = min(close_time_datetime64, period_now_datetime64)
 
         async with pool.acquire() as conn:
