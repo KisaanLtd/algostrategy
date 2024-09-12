@@ -1,0 +1,43 @@
+{
+    "api_key": "O625jr603bS399999661n+270wuS313C",
+    "api_secret": "k3R79O30W181H0j0C2580672610184h9",
+    "secret_key": "k3R79O30W181H0j0C2580672610184h9",
+    "api_session": "47006391",
+    "db_config": {
+        "host": "localhost",
+		"port":3306,
+        "user": "root",
+        "password": "7878@password",
+        "database": "1m_banknifty"
+    },
+    "tvdatafeed": {
+        "username": "dshindeh",
+        "password": "Easy@Datta$7878"
+    },
+	    "holidays": [
+        "2024-01-26",
+        "2024-08-15",
+		"2024-10-02",
+		"2024-11-01",
+		"2024-11-15",
+		"2024-12-25"
+    ],
+	"expiry_date": "2024-09-18",
+    "stock_code":"CNXBAN",
+    "exchange_code":"NFO",
+    "product":"options",
+    "quantity":"15",
+    "mysql_config":{
+        "host" : "adataserver.mysql.database.azure.com",
+        "port":3306,
+        "database":"mbanknifty",
+        "user":"myalgodbadmin",
+        "password":"7878@password",
+        "ssl": {
+            "ca": "DigiCertGlobalRootCA.crt.pem",
+            "verify_cert": true
+    }
+    
+    }
+}
+

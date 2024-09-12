@@ -1,3 +1,4 @@
+import os
 import json
 import asyncio
 import aiomysql
@@ -6,6 +7,12 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, time, timedelta
 from breeze_connect import BreezeConnect
+
+# Get the absolute path of the project root
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+# Reference to config.json
+config_path = os.path.join(project_root, 'config', 'config.json')
+
 
 IST = pytz.timezone('Asia/Kolkata')
 
@@ -242,10 +249,13 @@ class OnesToOnem:
             pool.close()
             await pool.wait_closed()
 
-
 if __name__ == "__main__":
-    with open('config.json') as config_file:
-        config = json.load(config_file)
+    with open(config_path, 'r') as f:
+        config = json.load(f)
+
+# if __name__ == "__main__":
+#     with open('config.json') as config_file:
+#         config = json.load(config_file)
 
     onestoonem = OnesToOnem(config)
     asyncio.run(onestoonem.run())

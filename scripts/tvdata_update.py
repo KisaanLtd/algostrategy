@@ -1,3 +1,4 @@
+import os
 from tvDatafeed import TvDatafeed, Interval
 import pandas as pd
 import json
@@ -5,6 +6,11 @@ import asyncio
 import aiomysql
 import numpy as np
 from datetime import datetime, time, timedelta
+
+# Get the absolute path of the project root
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+# Reference to config.json
+config_path = os.path.join(project_root, 'config', 'config.json')
 
 
 class TvDataUpdate:
@@ -201,8 +207,12 @@ class TvDataUpdate:
 
 
 if __name__ == "__main__":
-    with open('config.json') as config_file:
-        config = json.load(config_file)
+    with open(config_path, 'r') as f:
+        config = json.load(f)
+
+# if __name__ == "__main__":
+#     with open('config.json') as config_file:
+#         config = json.load(config_file)
 
     tvdata_update = TvDataUpdate(config)
     asyncio.run(tvdata_update.run())

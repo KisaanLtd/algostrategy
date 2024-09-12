@@ -1,3 +1,4 @@
+import os
 import json
 import asyncio
 import aiomysql
@@ -7,9 +8,27 @@ import numpy as np
 from datetime import datetime, time, timedelta
 from scipy.signal import find_peaks
 from breeze_connect import BreezeConnect
+import logging
 
-# logging.basicConfig(level=logging.INFO)
-# Configure logging to output to a file
+# Get the absolute path of the project root
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+# Reference to config.json
+config_path = os.path.join(project_root, 'config', 'config.json')
+# Reference to option_buying.log
+log_path = os.path.join(project_root, 'logs', 'option_buying.log')
+
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(log_path),
+        logging.StreamHandler()
+    ]
+)
+
+
 IST = pytz.timezone('Asia/Kolkata')
 
 
@@ -41,13 +60,13 @@ class TradingBot:
         open_time = datetime.strptime('09:15', '%H:%M').time()
         close_time = datetime.strptime('15:30', '%H:%M').time()
         is_open = open_time <= current_time < close_time
-        # print(f"Market open status: {is_open}")
+        ## print(f"Market open status: {is_open}")
         return is_open
 
     def is_business_day(self, date):
         is_business = date.weekday() < 5 and date.strftime(
             '%Y-%m-%d') not in self.config['holidays']
-        # print(f"Date {date.strftime('%Y-%m-%d')} is business day: {is_business}")
+        ## print(f"Date {date.strftime('%Y-%m-%d')} is business day: {is_business}")
         return is_business
 
     def get_sleep_duration(self):
@@ -64,8 +83,8 @@ class TradingBot:
 
         sleep_duration = (next_market_open_datetime -
                           current_datetime).total_seconds()
-        # print(
-        #     f"Sleep duration until next market open: {sleep_duration} seconds")
+        ## print(
+        ##     f"Sleep duration until next market open: {sleep_duration} seconds")
         return sleep_duration
 
     async def fetch_indicators_data(self, pool, table_name):
@@ -101,8 +120,8 @@ class TradingBot:
         peak_df_filtered = peak_df[peak_df['PeakProm'] > 80]
         trough_df_filtered = trough_df[trough_df['TroughProm'] > 80]
 
-        # peak_sorted_df = peak_df_filtered.sort_values(by='Datetime', ascending=True)
-        # trough_sorted_df = trough_df_filtered.sort_values(by='Datetime', ascending=True)
+        ##peak_sorted_df = peak_df_filtered.sort_values(by='Datetime', ascending=True)
+        ##trough_sorted_df = trough_df_filtered.sort_values(by='Datetime', ascending=True)
 
         peak_sorted_df = peak_df.sort_values(by='Datetime', ascending=True)
         trough_sorted_df = trough_df.sort_values(by='Datetime', ascending=True)
@@ -130,17 +149,17 @@ class TradingBot:
 
         max_peak_trough_datetime = max(
             latest_peak_datetime, latest_trough_datetime)
-        # peak_trough_range = (latest_peak_value - latest_trough_value).round(2)
+        ##peak_trough_range = (latest_peak_value - latest_trough_value).round(2)
 
-        # if max_peak_trough_datetime == latest_peak_datetime and peak_trough_range >= 70:
+        ##if max_peak_trough_datetime == latest_peak_datetime and peak_trough_range >= 70:
         if max_peak_trough_datetime == latest_peak_datetime:
             if latest_peak_prom > latest_trough_prom:
-                # return strike_price_pe, "put", max_peak_trough_datetime, peak_trough_range
+                ## return strike_price_pe, "put", max_peak_trough_datetime, peak_trough_range
                 return strike_price_pe, "put", max_peak_trough_datetime
-        # elif max_peak_trough_datetime == latest_trough_datetime and peak_trough_range >= 70:
+        ##elif max_peak_trough_datetime == latest_trough_datetime and peak_trough_range >= 70:
         elif max_peak_trough_datetime == latest_trough_datetime:
             if latest_peak_prom < latest_trough_prom:
-                # return strike_price_ce, "call", max_peak_trough_datetime, peak_trough_range
+                ## return strike_price_ce, "call", max_peak_trough_datetime, peak_trough_range
                 return strike_price_ce, "call", max_peak_trough_datetime
 
         # return None, None, max_peak_trough_datetime, peak_trough_range
@@ -209,8 +228,8 @@ class TradingBot:
 
     async def place_order(self, option_type, strike_price, max_peak_trough_datetime, entry_trigger_price):
         if not strike_price or not option_type:
-            # logging.error(
-            #     "Invalid option_type or strike_price for placing order.")
+            logging.error(
+                "Invalid option_type or strike_price for placing order.")
             return
 
         transaction_type = "BUY"  # Assuming you want to place a BUY order
@@ -236,9 +255,9 @@ class TradingBot:
         )
         return response
 
-        # logging.info(f"Order placed for {option_type} {strike_price} : {response}")
-        # logging.info(
-        #     f"Order placed for {option_type} {strike_price} at price {entry_trigger_price}: {response}")
+        logging.info(f"Order placed for {option_type} {strike_price} : {response}")
+        logging.info(
+            f"Order placed for {option_type} {strike_price} at price {entry_trigger_price}: {response}")
 
     async def run(self):
         table_name = "indicators_data"
@@ -248,17 +267,17 @@ class TradingBot:
             latest_peak_row, latest_trough_row, _, _ = await self.get_peak_trough(data)
             TrendUp2crossover, TrendUp2crossunder = await self.TrendUp2_cross(data)
             call_entry_trigger, put_entry_trigger, max_trendup2cross_datetime = await self.get_entry_trigger(latest_peak_row, latest_trough_row, TrendUp2crossover, TrendUp2crossunder)
-            # logging.info("call_entry_trigger: %s", call_entry_trigger)
-            # logging.info("put_entry_trigger: %s", put_entry_trigger)
-            # logging.info("max_trendup2cross_datetime: %s",
-            #              max_trendup2cross_datetime)
+            logging.info("call_entry_trigger: %s", call_entry_trigger)
+            logging.info("put_entry_trigger: %s", put_entry_trigger)
+            logging.info("max_trendup2cross_datetime: %s",
+                         max_trendup2cross_datetime)
 
             # strike_price, option_type, max_peak_trough_datetime, peak_trough_range = await self.get_strike_prices(latest_peak_row, latest_trough_row)
             strike_price, option_type, max_peak_trough_datetime = await self.get_strike_prices(latest_peak_row, latest_trough_row)
-            # logging.info("strike_price: %s", strike_price)
-            # logging.info("option_type: %s", option_type)
-            # logging.info("max_peak_trough_datetime: %s",
-            #              max_peak_trough_datetime)
+            logging.info("strike_price: %s", strike_price)
+            logging.info("option_type: %s", option_type)
+            logging.info("max_peak_trough_datetime: %s",
+                         max_peak_trough_datetime)
             # logging.info("peak_trough_range: %s", peak_trough_range)
 
             if option_type == 'call' and call_entry_trigger and strike_price is not None:
@@ -310,8 +329,8 @@ class TradingBot:
 
 
 if __name__ == "__main__":
-    with open('config.json') as config_file:
-        config = json.load(config_file)
+    with open(config_path, 'r') as f:
+        config = json.load(f)
 
     bot = TradingBot(config)
     asyncio.run(bot.run_scheduled())
