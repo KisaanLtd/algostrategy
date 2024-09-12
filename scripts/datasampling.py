@@ -226,13 +226,12 @@ class OnesToOnem:
                         # current_time = pd.Timestamp.now(IST)
                         current_time = datetime.now(IST)
                         period_now = pd.Period.now('1min')
-                        period_now_start_time = period_now.start_time.replace(
-                            tzinfo=IST)
-                        next_execution = (
-                            period_now_start_time + pd.Timedelta(seconds=61))
-                        sleep_duration = (
-                            next_execution - current_time).total_seconds()
-                        await asyncio.sleep(sleep_duration)
+                        # period_now_start_time = period_now.start_time.replace(tzinfo=IST)
+                        next_period_start = (period_now + 1).start_time.replace(tzinfo=IST)
+                        next_execution = (next_period_start + pd.Timedelta(seconds=3))
+                        sleep_duration = (next_execution - current_time).total_seconds()
+                        if sleep_duration > 0 and sleep_duration < 61:
+                            await asyncio.sleep(sleep_duration)
                     await self.disconnect_from_websocket()
                 else:
                     now = datetime.now(IST)

@@ -307,12 +307,12 @@ class TradingBot:
 
                 current_time = datetime.now(IST)
                 period_now = pd.Period.now('1min')
-                period_now_start_time = period_now.start_time.replace(
-                    tzinfo=IST)
-                next_execution = (period_now_start_time +
-                                  pd.Timedelta(seconds=61))
+                # period_now_start_time = period_now.start_time.replace(tzinfo=IST)
+                next_period_start = (period_now + 1).start_time.replace(tzinfo=IST)
+                next_execution = (next_period_start +  pd.Timedelta(seconds=8))
                 sleep_till = (next_execution - current_time).total_seconds()
-                await asyncio.sleep(sleep_till)
+                if sleep_till > 0 and sleep_till < 64:
+                    await asyncio.sleep(sleep_till)
                 # next_run = (now + timedelta(minutes=1)).replace(second=10, microsecond=0)
                 # sleep_duration = (next_run - now).total_seconds()
                 # await asyncio.sleep(sleep_duration)
