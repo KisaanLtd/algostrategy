@@ -11,7 +11,7 @@ algostrategy/
 │   ├── trailing_sl.py             # Script for trailing stop-loss strategy
 │
 ├── logs/                          # Log files
-│   └── option_buying.log            # Example log file
+│   └── option_buying.log            #log file
 │
 ├── tests/                         # Unit tests and test scripts
 │   ├── test_tvdata.py             # Tests for tvdata.py
