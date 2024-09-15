@@ -109,39 +109,70 @@ class IndicatorUpdate:
         market_close_time = datetime.strptime('15:30', '%H:%M').time()
 
         period_now = pd.Period.now('1min')
-        open_time_datetime64 = pd.Period(market_open_time, '1min').start_time
-        close_time_datetime64 = pd.Period(market_close_time, '1min').end_time
-        # period_now_datetime64 = period_now.start_time - pd.Timedelta(minutes=1)
+        # open_time_datetime64 = pd.Period(market_open_time, '1min').start_time
+        # close_time_datetime64 = pd.Period(market_close_time, '1min').end_time
+        # # period_now_datetime64 = period_now.start_time - pd.Timedelta(minutes=1)
+        open_time_datetime64 = pd.Timestamp.combine(now.date(), market_open_time)
+        close_time_datetime64 = pd.Timestamp.combine(now.date(), market_close_time)
         period_now_datetime64 = period_now.start_time
+        previous_candle = (period_now - 1).start_time
         # next_period_start = (period_now + 1).start_time
         # sleep_duration = (period_now_datetime64 - now).total_seconds()
-        sleep_duration = (now - period_now_datetime64).total_seconds()
-        if sleep_duration > 0 and sleep_duration < 60:
-            min_datetime = min(close_time_datetime64, period_now_datetime64)
+        # sleep_duration = (now - period_now_datetime64).total_seconds()
+        sleep_duration = (now - previous_candle).total_seconds()
+
+        # if sleep_duration > 0 and sleep_duration < 60:
+        # if 60 < sleep_duration < 120:
+        min_datetime = min(close_time_datetime64, previous_candle)
+            # min_datetime = min(close_time_datetime64, period_now_datetime64)
 
         async with pool.acquire() as conn:
             async with conn.cursor() as cursor:
+                # query = f"""
+                # WITH RECURSIVE datetime_sequence AS (
+                #     SELECT '{open_time_datetime64}' AS dt
+                #     UNION ALL
+                #     SELECT DATE_ADD(dt, INTERVAL 1 MINUTE)
+                #     FROM datetime_sequence
+                #     WHERE dt < '{min_datetime}'
+                # )
+                # SELECT COUNT(*) AS num_issues
+                # FROM (
+                #     SELECT ds.dt AS datetime_missing_or_duplicate
+                #     FROM datetime_sequence ds
+                #     LEFT JOIN (
+                #         SELECT `datetime`, COUNT(*) AS cnt
+                #         FROM indicators_data
+                #         WHERE `datetime` >= '{open_time_datetime64}' AND `datetime` <= '{min_datetime}'
+                #         GROUP BY `datetime`
+                #     ) t ON ds.dt = t.`datetime`
+                #     WHERE t.`datetime` IS NULL OR t.cnt > 1
+                # ) AS issues;
+                # """
                 query = f"""
-                WITH RECURSIVE datetime_sequence AS (
-                    SELECT '{open_time_datetime64}' AS dt
-                    UNION ALL
-                    SELECT DATE_ADD(dt, INTERVAL 1 MINUTE)
-                    FROM datetime_sequence
-                    WHERE dt < '{min_datetime}'
-                )
-                SELECT COUNT(*) AS num_issues
-                FROM (
-                    SELECT ds.dt AS datetime_missing_or_duplicate
-                    FROM datetime_sequence ds
-                    LEFT JOIN (
-                        SELECT `datetime`, COUNT(*) AS cnt
-                        FROM indicators_data
-                        WHERE `datetime` >= '{open_time_datetime64}' AND `datetime` <= '{min_datetime}'
-                        GROUP BY `datetime`
-                    ) t ON ds.dt = t.`datetime`
-                    WHERE t.`datetime` IS NULL OR t.cnt > 1
-                ) AS issues;
-                """
+                        WITH RECURSIVE datetime_sequence AS (
+                            SELECT '{open_time_datetime64}' AS dt
+                            UNION ALL
+                            SELECT DATE_ADD(dt, INTERVAL 1 MINUTE)
+                            FROM datetime_sequence
+                            WHERE dt < '{min_datetime}'
+                        )
+                        SELECT COUNT(*) AS num_issues
+                        FROM (
+                            SELECT ds.dt AS datetime_missing_or_duplicate
+                            FROM datetime_sequence ds
+                            LEFT JOIN (
+                                SELECT `datetime`, COUNT(*) AS cnt
+                                FROM indicators_data
+                                WHERE `datetime` >= '{open_time_datetime64}' AND `datetime` <= '{min_datetime}'
+                                GROUP BY `datetime`
+                            ) t ON ds.dt = t.`datetime`
+                            LEFT JOIN indicators_data id ON ds.dt = id.`datetime`
+                            WHERE t.`datetime` IS NULL 
+                               OR t.cnt > 1
+                               OR COALESCE(id.open, id.high, id.low, id.close, id.ohlc4) = 0
+                        ) AS issues;
+                        """
                 await cursor.execute(query)
                 result = await cursor.fetchone()
                 num_issues = result[0] if result else 0
@@ -151,7 +182,6 @@ class IndicatorUpdate:
                 else:
                     print("No gaps or duplicates found.")
                 return num_issues
-
 
 
     async def fetch_ohlctick_1mdata(self, pool):
@@ -292,7 +322,9 @@ class IndicatorUpdate:
                 period_now = pd.Period.now('1min')
                 # period_now_start = period_now.start_time.replace(tzinfo=IST)
                 next_period_start = (period_now + 1).start_time.replace(tzinfo=IST)
+                previous_finished = period_now.start_time.replace(tzinfo=IST)
                 next_execution = (next_period_start + pd.Timedelta(seconds=6))
+                # next_execution = (previous_finished + pd.Timedelta(seconds=6))
                 sleep_till = (next_execution - current_time).total_seconds()
                 if sleep_till > 0 and sleep_till < 63:
                     await asyncio.sleep(sleep_till)

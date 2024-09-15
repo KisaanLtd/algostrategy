@@ -120,8 +120,7 @@ class OnesToOnem:
                         ohlc_1s_df['datetime'], errors='coerce')
                     ohlc_1s_df.set_index('datetime', inplace=True)
 
-                    period_index = pd.date_range(
-                        start=open_time_datetime64, end=min_datetime, freq='s')
+                    period_index = pd.date_range(start=open_time_datetime64, end=min_datetime, freq='s')
                     ohlc_1s_df = ohlc_1s_df.reindex(period_index)
 
                     ohlc_dict = {
@@ -172,7 +171,7 @@ class OnesToOnem:
                                     'high', 'low', 'close', 'ohlc4']
                 tick_df = tick_df[selected_columns]
                 pool = await self.get_mysql_pool()
-                await self.insert_tick_dataframe(pool, 'ohlctick_1sdata', tick_df)
+                await self.insert_tick_dataframe(pool, 'ohlctick_1mdata', tick_df)
                 pool.close()
                 await pool.wait_closed()
             else:
@@ -188,13 +187,13 @@ class OnesToOnem:
         self.api.ws_connect()
         self.api.on_ticks = self.async_on_ticks
         self.api.subscribe_feeds(
-            stock_token='4.1!NIFTY BANK', interval="1second")
+            stock_token='4.1!NIFTY BANK', interval="1minute")
         print("Subscribed to data feed")
 
     async def disconnect_from_websocket(self):
         print("Unsubscribing from data feed...")
         self.api.unsubscribe_feeds(
-            stock_token='4.1!NIFTY BANK', interval="1second")
+            stock_token='4.1!NIFTY BANK', interval="1minute")
         disconnected = self.api.ws_disconnect()
         if disconnected:
             print("WebSocket disconnected")
@@ -207,10 +206,8 @@ class OnesToOnem:
     def is_market_open(self):
         # now = pd.Timestamp.now(IST)
         now = datetime.now(IST)
-        market_open_time = datetime.combine(
-            now.date(), time(9, 15)).replace(tzinfo=IST)
-        market_close_time = datetime.combine(
-            now.date(), time(15, 30)).replace(tzinfo=IST)
+        market_open_time = datetime.combine(now.date(), time(9, 15)).replace(tzinfo=IST)
+        market_close_time = datetime.combine(now.date(), time(15, 30)).replace(tzinfo=IST)
         return market_open_time <= now <= market_close_time
 
     async def run(self):
@@ -222,7 +219,7 @@ class OnesToOnem:
                 if self.is_market_open() and self.is_business_day(now):
                     await self.connect_to_websocket()
                     while self.is_market_open():
-                        await self.fetch_and_resample_data(pool)
+                        # await self.fetch_and_resample_data(pool)
                         # current_time = pd.Timestamp.now(IST)
                         current_time = datetime.now(IST)
                         period_now = pd.Period.now('1min')

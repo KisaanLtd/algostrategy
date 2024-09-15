@@ -166,10 +166,8 @@ class TradingBot:
         return None, None, max_peak_trough_datetime
 
     async def TrendUp2_cross(self, data):
-        TrendUp2crossover = (data['TrendUp2'] == 1) & (
-            data['TrendUp2'].shift(1) == 0)
-        TrendUp2crossunder = (data['TrendUp2'] == 0) & (
-            data['TrendUp2'].shift(1) == 1)
+        TrendUp2crossover = (data['TrendUp2'] == 1) & (data['TrendUp2'].shift(1) == 0)
+        TrendUp2crossunder = (data['TrendUp2'] == 0) & (data['TrendUp2'].shift(1) == 1)
         return data.loc[TrendUp2crossover], data.loc[TrendUp2crossunder]
 
     async def get_entry_trigger(self, latest_peak_row, latest_trough_row, TrendUp2crossover, TrendUp2crossunder):
@@ -178,28 +176,18 @@ class TradingBot:
 
         latest_peak_datetime = latest_peak_row['Datetime']
         latest_trough_datetime = latest_trough_row['Datetime']
-        latest_trendup2_crossover_datetime = TrendUp2crossover['datetime'].max(
-        ) if not TrendUp2crossover.empty else pd.Timestamp.min
-        latest_trendup2_crossunder_datetime = TrendUp2crossunder['datetime'].max(
-        ) if not TrendUp2crossunder.empty else pd.Timestamp.min
-        max_trendup2cross_datetime = max(
-            latest_trendup2_crossover_datetime, latest_trendup2_crossunder_datetime)
-        max_peak_trough_datetime = max(
-            latest_peak_datetime, latest_trough_datetime)
+        latest_trendup2_crossover_datetime = TrendUp2crossover['datetime'].max() if not TrendUp2crossover.empty else pd.Timestamp.min
+        latest_trendup2_crossunder_datetime = TrendUp2crossunder['datetime'].max() if not TrendUp2crossunder.empty else pd.Timestamp.min
+        max_trendup2cross_datetime = max(latest_trendup2_crossover_datetime, latest_trendup2_crossunder_datetime)
+        max_peak_trough_datetime = max(latest_peak_datetime, latest_trough_datetime)
 
-        trendup2_crossunder_vstop2 = TrendUp2crossunder.iloc[-1]['VStop2'] if not TrendUp2crossunder.empty else float(
-            'inf')
-        trendup2_crossunder_highsma5 = TrendUp2crossunder.iloc[-1]['highsma5'] if not TrendUp2crossunder.empty else float(
-            'inf')
-        trendup2_crossunder_highsma5_off3 = TrendUp2crossunder.iloc[-1]['highsma5_off3'] if not TrendUp2crossunder.empty else float(
-            'inf')
+        trendup2_crossunder_vstop2 = TrendUp2crossunder.iloc[-1]['VStop2'] if not TrendUp2crossunder.empty else float('inf')
+        trendup2_crossunder_highsma5 = TrendUp2crossunder.iloc[-1]['highsma5'] if not TrendUp2crossunder.empty else float('inf')
+        trendup2_crossunder_highsma5_off3 = TrendUp2crossunder.iloc[-1]['highsma5_off3'] if not TrendUp2crossunder.empty else float('inf')
 
-        trendup2_crossover_vstop2 = TrendUp2crossover.iloc[-1]['VStop2'] if not TrendUp2crossover.empty else -float(
-            'inf')
-        trendup2_crossover_lowsma5 = TrendUp2crossover.iloc[-1]['lowsma5'] if not TrendUp2crossover.empty else -float(
-            'inf')
-        trendup2_crossover_lowsma5_off3 = TrendUp2crossover.iloc[-1]['lowsma5_off3'] if not TrendUp2crossover.empty else -float(
-            'inf')
+        trendup2_crossover_vstop2 = TrendUp2crossover.iloc[-1]['VStop2'] if not TrendUp2crossover.empty else -float('inf')
+        trendup2_crossover_lowsma5 = TrendUp2crossover.iloc[-1]['lowsma5'] if not TrendUp2crossover.empty else -float('inf')
+        trendup2_crossover_lowsma5_off3 = TrendUp2crossover.iloc[-1]['lowsma5_off3'] if not TrendUp2crossover.empty else -float('inf')
 
         call_entry_trigger = None
         put_entry_trigger = None

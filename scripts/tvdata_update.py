@@ -65,65 +65,80 @@ class TvDataUpdate:
 
     async def check_missing_or_duplicate_keys(self, pool):
         now = pd.Timestamp.now()
-        # market_open_time = datetime.combine(now.date(), time(9, 15))
-        # market_close_time = datetime.combine(now.date(), time(15, 28))
-
         market_open_time = datetime.strptime('09:15', '%H:%M').time()
         market_close_time = datetime.strptime('15:30', '%H:%M').time()
 
-
+        # Create Period object for the current minute
         period_now = pd.Period.now('1min')
-        open_time_datetime64 = pd.Period(market_open_time, '1min').start_time
-        close_time_datetime64 = pd.Period(market_close_time, '1min').end_time
-        # period_now_datetime64 = period_now.start_time - pd.Timedelta(minutes=1)
+
+        # Get the start time and end time of the market in datetime64 format
+        open_time_datetime64 = pd.Timestamp.combine(now.date(), market_open_time)
+        close_time_datetime64 = pd.Timestamp.combine(now.date(), market_close_time)
+
+        # Get the start time of the current period
         period_now_datetime64 = period_now.start_time
-        # next_period_start = (period_now + 1).start_time
-        sleep_duration = (now - period_now_datetime64).total_seconds()
-        if sleep_duration > 0 and sleep_duration < 60:
-            min_datetime = min(close_time_datetime64, period_now_datetime64)
-        # period_now_datetime64 = period_now.end_time - pd.Timedelta(minutes=1)
-        # min_datetime = min(close_time_datetime64, period_now_datetime64)
+        previous_candle = (period_now - 1).start_time
+
+        # Calculate the sleep duration
+        # sleep_duration = (now - period_now_datetime64).total_seconds()
+        sleep_duration = (now - previous_candle).total_seconds()
+
+        # Ensure min_datetime is always assigned
+        # if 60 < sleep_duration < 120:
+            # min_datetime = min(close_time_datetime64, period_now_datetime64)
+        min_datetime = min(close_time_datetime64, previous_candle)
+        # else:
+        #     min_datetime = close_time_datetime64
+
+        # if 0 < sleep_duration < 60:
+        #     min_datetime = min(close_time_datetime64, period_now_datetime64)
+
 
         async with pool.acquire() as conn:
             async with conn.cursor() as cursor:
                 query = f"""
-                WITH RECURSIVE datetime_sequence AS (
-                    SELECT '{open_time_datetime64}' AS dt
-                    UNION ALL
-                    SELECT DATE_ADD(dt, INTERVAL 1 MINUTE)
-                    FROM datetime_sequence
-                    WHERE dt < '{min_datetime}'
-                )
-                SELECT COUNT(*) AS num_issues
-                FROM (
-                    SELECT ds.dt AS datetime_missing_or_duplicate
-                    FROM datetime_sequence ds
-                    LEFT JOIN (
-                        SELECT `datetime`, COUNT(*) AS cnt
-                        FROM ohlctick_1mdata
-                        WHERE `datetime` >= '{open_time_datetime64}' AND `datetime` <= '{min_datetime}'
-                        GROUP BY `datetime`
-                    ) t ON ds.dt = t.`datetime`
-                    WHERE t.`datetime` IS NULL OR t.cnt > 1
-                ) AS issues;
-                """
+                    WITH RECURSIVE datetime_sequence AS (
+                        SELECT '{open_time_datetime64}' AS dt
+                        UNION ALL
+                        SELECT DATE_ADD(dt, INTERVAL 1 MINUTE)
+                        FROM datetime_sequence
+                        WHERE dt < '{min_datetime}'
+                    )
+                    SELECT COUNT(*) AS num_issues
+                    FROM (
+                        SELECT ds.dt AS datetime_missing_or_duplicate
+                        FROM datetime_sequence ds
+                        LEFT JOIN (
+                            SELECT `datetime`, COUNT(*) AS cnt
+                            FROM ohlctick_1mdata
+                            WHERE `datetime` >= '{open_time_datetime64}' AND `datetime` <= '{min_datetime}'
+                            GROUP BY `datetime`
+                        ) t ON ds.dt = t.`datetime`
+                        LEFT JOIN ohlctick_1mdata id ON ds.dt = id.`datetime`
+                        WHERE t.`datetime` IS NULL 
+                           OR t.cnt > 1
+                           OR COALESCE(id.open, id.high, id.low, id.close, id.ohlc4) = 0
+                    ) AS issues;
+                    """
+
                 await cursor.execute(query)
                 result = await cursor.fetchone()
                 num_issues = result[0] if result else 0
                 if num_issues:
-                    print(
-                        "Number of missing or duplicate datetime entries found:", num_issues)
+                    print("Number of missing or duplicate datetime entries found:", num_issues)
                 else:
                     print("No gaps or duplicates found.")
                 return num_issues
 
     async def insert_tick_dataframe(self, pool, tick_df):
+        # past_tick_df = tick_df.iloc[:-1]
         async with pool.acquire() as conn:
             async with conn.cursor() as cursor:
                 try:
                     insert_query = '''REPLACE INTO ohlctick_1mdata (datetime, open, high, low, close, ohlc4)
                     VALUES (%s, %s, %s, %s, %s, %s)'''
                     records = tick_df.to_dict(orient='records')
+                    # records = past_tick_df.to_dict(orient='records')
                     for record in records:
                         await cursor.execute(insert_query, (
                             record['datetime'], record['open'], record['high'],
@@ -142,7 +157,7 @@ class TvDataUpdate:
             pool = await self.get_mysql_pool()
             num_issues = await self.check_missing_or_duplicate_keys(pool)
             data = tv.get_hist(symbol='BANKNIFTY', exchange='NSE',
-                               interval=Interval.in_1_minute, n_bars=num_issues+2)
+                               interval=Interval.in_1_minute, n_bars=num_issues+100)
             dataf = pd.DataFrame(data)
             dataf.index = pd.to_datetime(dataf.index, errors='coerce')
             dataf.reset_index(inplace=True)
