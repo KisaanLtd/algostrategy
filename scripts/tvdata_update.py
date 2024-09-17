@@ -80,19 +80,9 @@ class TvDataUpdate:
         previous_candle = (period_now - 1).start_time
 
         # Calculate the sleep duration
-        # sleep_duration = (now - period_now_datetime64).total_seconds()
         sleep_duration = (now - previous_candle).total_seconds()
-
-        # Ensure min_datetime is always assigned
-        # if 60 < sleep_duration < 120:
-            # min_datetime = min(close_time_datetime64, period_now_datetime64)
         min_datetime = min(close_time_datetime64, previous_candle)
-        # else:
-        #     min_datetime = close_time_datetime64
-
-        # if 0 < sleep_duration < 60:
-        #     min_datetime = min(close_time_datetime64, period_now_datetime64)
-
+        
 
         async with pool.acquire() as conn:
             async with conn.cursor() as cursor:

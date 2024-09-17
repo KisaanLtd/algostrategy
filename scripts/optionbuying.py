@@ -28,17 +28,13 @@ logging.basicConfig(
     ]
 )
 
-
 IST = pytz.timezone('Asia/Kolkata')
-
 
 class TradingBot:
     def __init__(self, config):
         self.config = config
         self.api = BreezeConnect(api_key=config['api_key'])
-        self.api.generate_session(
-            api_secret=config['secret_key'], session_token=config['api_session'])
-        # expiry_date = self.config['expiry_date']
+        self.api.generate_session(api_secret=config['secret_key'], session_token=config['api_session'])
 
     async def get_mysql_pool(self):
         db_config = self.config['db_config']
@@ -117,8 +113,8 @@ class TradingBot:
             'TroughProm': properties_troughs['prominences']
         })
 
-        peak_df_filtered = peak_df[peak_df['PeakProm'] > 80]
-        trough_df_filtered = trough_df[trough_df['TroughProm'] > 80]
+        # peak_df_filtered = peak_df[peak_df['PeakProm'] > 80]
+        # trough_df_filtered = trough_df[trough_df['TroughProm'] > 80]
 
         ##peak_sorted_df = peak_df_filtered.sort_values(by='Datetime', ascending=True)
         ##trough_sorted_df = trough_df_filtered.sort_values(by='Datetime', ascending=True)
@@ -147,20 +143,19 @@ class TradingBot:
         strike_price_pe = int(
             (latest_peak_value - latest_peak_value % 100) - 100)
 
-        max_peak_trough_datetime = max(
-            latest_peak_datetime, latest_trough_datetime)
+        max_peak_trough_datetime = max(latest_peak_datetime, latest_trough_datetime)
         ##peak_trough_range = (latest_peak_value - latest_trough_value).round(2)
 
         ##if max_peak_trough_datetime == latest_peak_datetime and peak_trough_range >= 70:
         if max_peak_trough_datetime == latest_peak_datetime:
-            if latest_peak_prom > latest_trough_prom:
+            # if latest_peak_prom > latest_trough_prom:
                 ## return strike_price_pe, "put", max_peak_trough_datetime, peak_trough_range
-                return strike_price_pe, "put", max_peak_trough_datetime
+            return strike_price_pe, "put", max_peak_trough_datetime
         ##elif max_peak_trough_datetime == latest_trough_datetime and peak_trough_range >= 70:
         elif max_peak_trough_datetime == latest_trough_datetime:
-            if latest_peak_prom < latest_trough_prom:
+            # if latest_peak_prom < latest_trough_prom:
                 ## return strike_price_ce, "call", max_peak_trough_datetime, peak_trough_range
-                return strike_price_ce, "call", max_peak_trough_datetime
+            return strike_price_ce, "call", max_peak_trough_datetime
 
         # return None, None, max_peak_trough_datetime, peak_trough_range
         return None, None, max_peak_trough_datetime
@@ -220,7 +215,7 @@ class TradingBot:
                 "Invalid option_type or strike_price for placing order.")
             return
 
-        transaction_type = "BUY"  # Assuming you want to place a BUY order
+        transaction_type = "BUY"
         # expiry_date = self.default_expiry_date  # Default expiry date
         expiry_date = self.config['expiry_date']
 
@@ -264,8 +259,7 @@ class TradingBot:
             strike_price, option_type, max_peak_trough_datetime = await self.get_strike_prices(latest_peak_row, latest_trough_row)
             logging.info("strike_price: %s", strike_price)
             logging.info("option_type: %s", option_type)
-            logging.info("max_peak_trough_datetime: %s",
-                         max_peak_trough_datetime)
+            logging.info("max_peak_trough_datetime: %s", max_peak_trough_datetime)
             # logging.info("peak_trough_range: %s", peak_trough_range)
 
             if option_type == 'call' and call_entry_trigger and strike_price is not None:
@@ -279,10 +273,7 @@ class TradingBot:
             await pool.wait_closed()
 
     async def run_scheduled(self):
-        # ist = pytz.timezone('Asia/Kolkata')
-        # start_time = time(9, 15)
-        # end_time = time(15, 30)
-
+        
         while True:
             now = datetime.now(IST)
             if self.is_market_open():
@@ -301,20 +292,10 @@ class TradingBot:
                 sleep_till = (next_execution - current_time).total_seconds()
                 if sleep_till > 0 and sleep_till < 64:
                     await asyncio.sleep(sleep_till)
-                # next_run = (now + timedelta(minutes=1)).replace(second=10, microsecond=0)
-                # sleep_duration = (next_run - now).total_seconds()
-                # await asyncio.sleep(sleep_duration)
             else:
                 print("Outside trading hours: %s", now)
                 sleep_duration = self.get_sleep_duration()
                 await asyncio.sleep(sleep_duration)
-                # next_run = (now + timedelta(days=1)).replace(hour=9, minute=15, second=0, microsecond=0)
-                # sleep_duration = (next_run - now).total_seconds()
-                # await asyncio.sleep(sleep_duration)
-
-    # def is_business_day(self, date):
-    #     return np.is_busday(date.date())  # Simple business day check
-
 
 if __name__ == "__main__":
     with open(config_path, 'r') as f:

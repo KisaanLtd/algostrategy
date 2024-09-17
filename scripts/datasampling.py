@@ -17,7 +17,7 @@ config_path = os.path.join(project_root, 'config', 'config.json')
 IST = pytz.timezone('Asia/Kolkata')
 
 
-class OnesToOnem:
+class Get1Mtickdata:
     def __init__(self, config):
         self.config = config
         self.api = BreezeConnect(api_key=config['api_key'])
@@ -253,5 +253,5 @@ if __name__ == "__main__":
 #     with open('config.json') as config_file:
 #         config = json.load(config_file)
 
-    onestoonem = OnesToOnem(config)
-    asyncio.run(onestoonem.run())
+    onemdata = Get1Mtickdata(config)
+    asyncio.run(onemdata.run())
