@@ -1,0 +1,67 @@
+# ─────────────────────────────────────────────
+#  cloud-run-job.yaml
+#  Deploy as: gcloud run jobs replace cloud-run-job.yaml
+# ─────────────────────────────────────────────
+apiVersion: run.googleapis.com/v1
+kind: Job
+metadata:
+  name: algostrategy-pipeline
+  annotations:
+    run.googleapis.com/launch-stage: GA
+spec:
+  template:
+    spec:
+      taskCount: 1
+      timeoutSeconds: 3600       # 1 hour max per run (covers full market session)
+      template:
+        spec:
+          containers:
+            - image: gcr.io/algostratgy/algostrategy:latest
+              command: ["python", "scripts/tvdata_update.py"]
+              resources:
+                limits:
+                  cpu: "1"
+                  memory: "1Gi"
+              env:
+                # ── Load all secrets from Secret Manager ──
+                - name: DB_HOST
+                  valueFrom:
+                    secretKeyRef:
+                      name: db-host
+                      key: latest
+                - name: DB_PORT
+                  valueFrom:
+                    secretKeyRef:
+                      name: db-port
+                      key: latest
+                - name: DB_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: db-user
+                      key: latest
+                - name: DB_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: db-password
+                      key: latest
+                - name: DB_NAME
+                  valueFrom:
+                    secretKeyRef:
+                      name: db-name
+                      key: latest
+                - name: API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: breeze-api-key
+                      key: latest
+                - name: API_SECRET
+                  valueFrom:
+                    secretKeyRef:
+                      name: breeze-api-secret
+                      key: latest
+                - name: SESSION_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: breeze-session-token
+                      key: latest   # Update this secret daily before market open
+          serviceAccountName: algostrategy-sa@algostratgy.iam.gserviceaccount.com

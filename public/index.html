@@ -1,0 +1,746 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AlgoStratgy — Ops Console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:        #0a0c0f;
+    --bg2:       #111419;
+    --bg3:       #181c23;
+    --border:    #1f2530;
+    --border2:   #2a3140;
+    --green:     #00d084;
+    --green-dim: #00d08422;
+    --red:       #ff4757;
+    --red-dim:   #ff475722;
+    --amber:     #ffb300;
+    --amber-dim: #ffb30022;
+    --blue:      #3d8ef8;
+    --blue-dim:  #3d8ef818;
+    --purple:    #b06ef3;
+    --text:      #e2e8f0;
+    --text2:     #8896a8;
+    --text3:     #4a5568;
+    --mono:      'IBM Plex Mono', monospace;
+    --sans:      'IBM Plex Sans', sans-serif;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* ── scanline overlay ── */
+  body::before {
+    content: '';
+    position: fixed; inset: 0; z-index: 0; pointer-events: none;
+    background: repeating-linear-gradient(
+      0deg, transparent, transparent 2px,
+      rgba(0,0,0,0.03) 2px, rgba(0,0,0,0.03) 4px
+    );
+  }
+
+  /* ── top bar ── */
+  .topbar {
+    position: sticky; top: 0; z-index: 100;
+    background: rgba(10,12,15,0.92);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 2rem; height: 52px;
+  }
+  .topbar-left { display: flex; align-items: center; gap: 1rem; }
+  .logo {
+    font-family: var(--mono); font-size: 0.85rem; font-weight: 600;
+    color: var(--green); letter-spacing: 0.08em;
+    display: flex; align-items: center; gap: 0.5rem;
+  }
+  .logo-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 8px var(--green);
+    animation: pulse 2s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%,100% { opacity: 1; transform: scale(1); }
+    50%      { opacity: 0.5; transform: scale(0.8); }
+  }
+  .tag {
+    font-family: var(--mono); font-size: 0.65rem;
+    background: var(--bg3); border: 1px solid var(--border2);
+    color: var(--text3); padding: 2px 8px; border-radius: 3px;
+    letter-spacing: 0.05em;
+  }
+  .clock {
+    font-family: var(--mono); font-size: 0.75rem;
+    color: var(--text2); letter-spacing: 0.05em;
+  }
+  .market-badge {
+    font-family: var(--mono); font-size: 0.65rem; font-weight: 600;
+    padding: 3px 10px; border-radius: 3px; letter-spacing: 0.1em;
+    transition: all 0.3s;
+  }
+  .market-badge.open  { background: var(--green-dim);  color: var(--green); border: 1px solid var(--green); }
+  .market-badge.closed{ background: var(--red-dim);    color: var(--red);   border: 1px solid var(--red);   }
+
+  /* ── layout ── */
+  .main { position: relative; z-index: 1; max-width: 1100px; margin: 0 auto; padding: 2rem; }
+
+  /* ── section header ── */
+  .section-label {
+    font-family: var(--mono); font-size: 0.65rem; font-weight: 600;
+    color: var(--text3); letter-spacing: 0.15em; text-transform: uppercase;
+    display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1rem;
+  }
+  .section-label::after {
+    content: ''; flex: 1; height: 1px; background: var(--border);
+  }
+
+  /* ── action cards ── */
+  .action-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;
+    margin-bottom: 2rem;
+  }
+  @media (max-width: 640px) { .action-grid { grid-template-columns: 1fr; } }
+
+  .action-card {
+    background: var(--bg2); border: 1px solid var(--border);
+    border-radius: 6px; padding: 1.5rem;
+    display: flex; flex-direction: column; gap: 0.75rem;
+    transition: border-color 0.2s, transform 0.15s;
+    cursor: default;
+  }
+  .action-card:hover { border-color: var(--border2); transform: translateY(-1px); }
+
+  .card-icon {
+    width: 36px; height: 36px; border-radius: 6px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1.1rem;
+  }
+  .card-icon.green  { background: var(--green-dim);  }
+  .card-icon.blue   { background: var(--blue-dim);   }
+  .card-icon.amber  { background: var(--amber-dim);  }
+  .card-icon.red    { background: var(--red-dim);    }
+
+  .card-title {
+    font-family: var(--mono); font-size: 0.8rem; font-weight: 600;
+    color: var(--text); letter-spacing: 0.03em;
+  }
+  .card-desc {
+    font-size: 0.78rem; color: var(--text2); line-height: 1.5;
+  }
+
+  .btn {
+    display: inline-flex; align-items: center; gap: 0.5rem;
+    font-family: var(--mono); font-size: 0.75rem; font-weight: 600;
+    padding: 0.5rem 1rem; border-radius: 4px; border: 1px solid;
+    text-decoration: none; cursor: pointer; transition: all 0.15s;
+    letter-spacing: 0.05em; width: fit-content;
+  }
+  .btn-green {
+    background: var(--green-dim); color: var(--green);
+    border-color: var(--green);
+  }
+  .btn-green:hover { background: var(--green); color: #000; }
+
+  .btn-blue {
+    background: var(--blue-dim); color: var(--blue);
+    border-color: var(--blue);
+  }
+  .btn-blue:hover { background: var(--blue); color: #fff; }
+
+  .btn-amber {
+    background: var(--amber-dim); color: var(--amber);
+    border-color: var(--amber);
+  }
+  .btn-amber:hover { background: var(--amber); color: #000; }
+
+  .btn-ghost {
+    background: transparent; color: var(--text2);
+    border-color: var(--border2);
+  }
+  .btn-ghost:hover { border-color: var(--text2); color: var(--text); }
+
+  /* ── status grid ── */
+  .status-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 1px; background: var(--border);
+    border: 1px solid var(--border); border-radius: 6px;
+    overflow: hidden; margin-bottom: 2rem;
+  }
+  @media (max-width: 700px) { .status-grid { grid-template-columns: repeat(2,1fr); } }
+
+  .stat-cell {
+    background: var(--bg2); padding: 1rem 1.2rem;
+    display: flex; flex-direction: column; gap: 0.35rem;
+  }
+  .stat-label {
+    font-family: var(--mono); font-size: 0.6rem; font-weight: 500;
+    color: var(--text3); letter-spacing: 0.12em; text-transform: uppercase;
+  }
+  .stat-value {
+    font-family: var(--mono); font-size: 1.1rem; font-weight: 600;
+    color: var(--text);
+  }
+  .stat-value.green  { color: var(--green); }
+  .stat-value.red    { color: var(--red); }
+  .stat-value.amber  { color: var(--amber); }
+  .stat-sub {
+    font-family: var(--mono); font-size: 0.65rem; color: var(--text3);
+  }
+
+  /* ── endpoints table ── */
+  .endpoint-list {
+    background: var(--bg2); border: 1px solid var(--border);
+    border-radius: 6px; overflow: hidden; margin-bottom: 2rem;
+  }
+  .endpoint-row {
+    display: grid; grid-template-columns: 120px 1fr auto;
+    align-items: center; gap: 1rem; padding: 0.7rem 1.2rem;
+    border-bottom: 1px solid var(--border);
+    transition: background 0.15s;
+  }
+  .endpoint-row:last-child { border-bottom: none; }
+  .endpoint-row:hover { background: var(--bg3); }
+
+  .method-badge {
+    font-family: var(--mono); font-size: 0.62rem; font-weight: 600;
+    padding: 2px 7px; border-radius: 3px; letter-spacing: 0.08em;
+    width: fit-content;
+  }
+  .method-badge.get  { background: var(--green-dim); color: var(--green); border: 1px solid var(--green); }
+
+  .endpoint-path {
+    font-family: var(--mono); font-size: 0.75rem; color: var(--text);
+  }
+  .endpoint-desc {
+    font-size: 0.72rem; color: var(--text2); margin-top: 2px;
+  }
+  .endpoint-link {
+    font-family: var(--mono); font-size: 0.65rem; color: var(--text3);
+    text-decoration: none; padding: 3px 8px; border: 1px solid var(--border2);
+    border-radius: 3px; white-space: nowrap; transition: all 0.15s;
+  }
+  .endpoint-link:hover { color: var(--blue); border-color: var(--blue); }
+
+  /* ── jobs table ── */
+  .jobs-table {
+    background: var(--bg2); border: 1px solid var(--border);
+    border-radius: 6px; overflow: hidden; margin-bottom: 2rem;
+  }
+  .jobs-header {
+    display: grid; grid-template-columns: 2fr 1fr 1fr 1fr;
+    padding: 0.5rem 1.2rem;
+    background: var(--bg3); border-bottom: 1px solid var(--border);
+  }
+  .jobs-header span {
+    font-family: var(--mono); font-size: 0.6rem; font-weight: 600;
+    color: var(--text3); letter-spacing: 0.1em; text-transform: uppercase;
+  }
+  .job-row {
+    display: grid; grid-template-columns: 2fr 1fr 1fr 1fr;
+    align-items: center; padding: 0.7rem 1.2rem;
+    border-bottom: 1px solid var(--border); transition: background 0.15s;
+  }
+  .job-row:last-child { border-bottom: none; }
+  .job-row:hover { background: var(--bg3); }
+  .job-name {
+    font-family: var(--mono); font-size: 0.73rem; color: var(--text);
+  }
+  .job-name small {
+    display: block; font-size: 0.62rem; color: var(--text3); margin-top: 2px;
+  }
+  .job-cell {
+    font-family: var(--mono); font-size: 0.7rem; color: var(--text2);
+  }
+  .dot-green { color: var(--green); }
+  .dot-amber { color: var(--amber); }
+
+  /* ── token status panel ── */
+  .token-panel {
+    background: var(--bg2); border: 1px solid var(--border);
+    border-radius: 6px; padding: 1.5rem; margin-bottom: 2rem;
+    display: flex; flex-direction: column; gap: 1rem;
+  }
+  .token-row {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 1rem; flex-wrap: wrap;
+  }
+  .token-info { display: flex; flex-direction: column; gap: 0.25rem; }
+  .token-info p { font-size: 0.78rem; color: var(--text2); line-height: 1.6; }
+  .token-info code {
+    font-family: var(--mono); font-size: 0.7rem;
+    background: var(--bg3); border: 1px solid var(--border2);
+    padding: 2px 7px; border-radius: 3px; color: var(--amber);
+  }
+  .token-steps {
+    background: var(--bg3); border: 1px solid var(--border);
+    border-radius: 4px; padding: 1rem;
+  }
+  .step {
+    display: flex; gap: 0.75rem; align-items: flex-start;
+    font-size: 0.75rem; color: var(--text2); line-height: 1.5;
+    margin-bottom: 0.5rem;
+  }
+  .step:last-child { margin-bottom: 0; }
+  .step-num {
+    font-family: var(--mono); font-size: 0.65rem; font-weight: 600;
+    background: var(--border2); color: var(--text3);
+    width: 20px; height: 20px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0; margin-top: 1px;
+  }
+
+  /* ── footer ── */
+  .footer {
+    border-top: 1px solid var(--border); padding: 1.5rem 2rem;
+    display: flex; align-items: center; justify-content: space-between;
+    flex-wrap: wrap; gap: 1rem;
+  }
+  .footer-left { font-family: var(--mono); font-size: 0.65rem; color: var(--text3); }
+  .footer-right { display: flex; gap: 0.75rem; }
+
+  /* ── toast ── */
+  .toast {
+    position: fixed; bottom: 1.5rem; right: 1.5rem; z-index: 999;
+    background: var(--bg3); border: 1px solid var(--green);
+    color: var(--green); font-family: var(--mono); font-size: 0.73rem;
+    padding: 0.6rem 1.2rem; border-radius: 4px;
+    box-shadow: 0 4px 20px rgba(0,208,132,0.15);
+    transform: translateY(20px); opacity: 0;
+    transition: all 0.25s; pointer-events: none;
+  }
+  .toast.show { transform: translateY(0); opacity: 1; }
+
+  /* ── live fetch indicator ── */
+  .fetching { animation: blink 1s step-end infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+</style>
+</head>
+<body>
+
+<!-- TOP BAR -->
+<div class="topbar">
+  <div class="topbar-left">
+    <div class="logo">
+      <div class="logo-dot"></div>
+      ALGOSTRATGY
+    </div>
+    <span class="tag">CLOUD RUN · ASIA-SOUTH1</span>
+  </div>
+  <div style="display:flex; align-items:center; gap:1rem;">
+    <span class="clock" id="clock">--:--:-- IST</span>
+    <span class="market-badge closed" id="market-badge">CLOSED</span>
+  </div>
+</div>
+
+<!-- MAIN -->
+<div class="main">
+
+  <!-- STATUS STRIP -->
+  <div class="status-grid" style="margin-bottom:2rem; margin-top:0.5rem;">
+    <div class="stat-cell">
+      <div class="stat-label">Project</div>
+      <div class="stat-value" style="font-size:0.85rem;">algostratgy</div>
+      <div class="stat-sub">GCP · Mumbai</div>
+    </div>
+    <div class="stat-cell">
+      <div class="stat-label">Market Hours</div>
+      <div class="stat-value" id="stat-market">--</div>
+      <div class="stat-sub">09:15 – 15:30 IST</div>
+    </div>
+    <div class="stat-cell">
+      <div class="stat-label">Breeze Token</div>
+      <div class="stat-value amber" id="stat-token">checking…</div>
+      <div class="stat-sub" id="stat-token-sub">–</div>
+    </div>
+    <div class="stat-cell">
+      <div class="stat-label">DB Rows</div>
+      <div class="stat-value" id="stat-rows" style="font-size:0.85rem;">checking…</div>
+      <div class="stat-sub" id="stat-rows-sub">ohlc / indicators</div>
+    </div>
+  </div>
+
+  <!-- PRIMARY ACTIONS -->
+  <div class="section-label">Primary Actions</div>
+  <div class="action-grid">
+
+    <!-- Session Token -->
+    <div class="action-card">
+      <div class="card-icon green">🔑</div>
+      <div>
+        <div class="card-title">Update Session Token</div>
+        <div class="card-desc">Log in to ICICI Breeze portal. After login you will be redirected to the callback URL and the session token will be saved to Secret Manager automatically.</div>
+      </div>
+      <div class="token-steps">
+        <div class="step">
+          <div class="step-num">1</div>
+          <span>Click <strong style="color:var(--text);">Open Breeze Login</strong> — ICICI login page opens</span>
+        </div>
+        <div class="step">
+          <div class="step-num">2</div>
+          <span>Complete login. Browser redirects to <code style="font-family:var(--mono);font-size:0.68rem;color:var(--green);">/breeze/callback</code></span>
+        </div>
+        <div class="step">
+          <div class="step-num">3</div>
+          <span>Token saved to <code style="font-family:var(--mono);font-size:0.68rem;color:var(--amber);">breeze-session-token</code> in Secret Manager</span>
+        </div>
+      </div>
+      <div style="display:flex; gap:0.75rem; flex-wrap:wrap;">
+        <a href="https://api.icicidirect.com/apiuser/login?api_key=O625jr603bS399999661n%2b270wuS313C"
+           target="_blank" class="btn btn-green">
+          ↗ Open Breeze Login
+        </a>
+        <a href="/breeze/status" target="_blank" class="btn btn-ghost">
+          Check Token Status
+        </a>
+      </div>
+    </div>
+
+    <!-- Dashboard -->
+    <div class="action-card">
+      <div class="card-icon blue">📊</div>
+      <div>
+        <div class="card-title">Live Dashboard</div>
+        <div class="card-desc">Open the Cloud Run web service dashboard — live OHLC data, indicator signals, option buying status, and system health.</div>
+      </div>
+      <div style="display:flex; gap:0.75rem; flex-wrap:wrap;">
+        <a href="https://algostratgy-web-1018458560096.asia-south1.run.app/"
+           target="_blank" class="btn btn-blue">
+          ↗ Open Dashboard
+        </a>
+        <a href="https://algostratgy-web-1018458560096.asia-south1.run.app/signals"
+           target="_blank" class="btn btn-ghost">
+          Signals JSON
+        </a>
+        <a href="https://algostratgy-web-1018458560096.asia-south1.run.app/db"
+           target="_blank" class="btn btn-ghost">
+          DB Status
+        </a>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- TOKEN STATUS -->
+  <div class="section-label">Session Token</div>
+  <div class="token-panel">
+    <div class="token-row">
+      <div class="token-info">
+        <div class="card-title">breeze-session-token</div>
+        <p>Stored in GCP Secret Manager. Auto-expires after 24h (<code>version-destroy-ttl=86400</code>). Must be refreshed each trading day before 09:14 IST when schedulers fire.</p>
+      </div>
+      <div style="display:flex; gap:0.5rem;">
+        <a href="/breeze/status" target="_blank" class="btn btn-ghost" style="white-space:nowrap;">
+          /breeze/status ↗
+        </a>
+        <button class="btn btn-amber" onclick="refreshTokenStatus()" id="refresh-btn">
+          ↻ Refresh
+        </button>
+      </div>
+    </div>
+    <div id="token-detail" style="font-family:var(--mono);font-size:0.72rem;color:var(--text2);
+         background:var(--bg3);border:1px solid var(--border);border-radius:4px;padding:0.75rem;">
+      Fetching token status…
+    </div>
+  </div>
+
+  <!-- API ENDPOINTS -->
+  <div class="section-label">API Endpoints</div>
+  <div class="endpoint-list">
+    <div class="endpoint-row">
+      <div><span class="method-badge get">GET</span></div>
+      <div>
+        <div class="endpoint-path">/</div>
+        <div class="endpoint-desc">Live dashboard — OHLC table, signals, system status</div>
+      </div>
+      <a href="https://algostratgy-web-1018458560096.asia-south1.run.app/" target="_blank" class="endpoint-link">Open ↗</a>
+    </div>
+    <div class="endpoint-row">
+      <div><span class="method-badge get">GET</span></div>
+      <div>
+        <div class="endpoint-path">/signals</div>
+        <div class="endpoint-desc">Latest option buying signals from placeorder_track</div>
+      </div>
+      <a href="https://algostratgy-web-1018458560096.asia-south1.run.app/signals" target="_blank" class="endpoint-link">Open ↗</a>
+    </div>
+    <div class="endpoint-row">
+      <div><span class="method-badge get">GET</span></div>
+      <div>
+        <div class="endpoint-path">/data</div>
+        <div class="endpoint-desc">Latest 10 OHLC rows from ohlctick_1mdata</div>
+      </div>
+      <a href="https://algostratgy-web-1018458560096.asia-south1.run.app/data" target="_blank" class="endpoint-link">Open ↗</a>
+    </div>
+    <div class="endpoint-row">
+      <div><span class="method-badge get">GET</span></div>
+      <div>
+        <div class="endpoint-path">/db</div>
+        <div class="endpoint-desc">DB connection + row counts for all tables</div>
+      </div>
+      <a href="https://algostratgy-web-1018458560096.asia-south1.run.app/db" target="_blank" class="endpoint-link">Open ↗</a>
+    </div>
+    <div class="endpoint-row">
+      <div><span class="method-badge get">GET</span></div>
+      <div>
+        <div class="endpoint-path">/status</div>
+        <div class="endpoint-desc">Market open/closed status, IST time, weekday</div>
+      </div>
+      <a href="https://algostratgy-web-1018458560096.asia-south1.run.app/status" target="_blank" class="endpoint-link">Open ↗</a>
+    </div>
+    <div class="endpoint-row">
+      <div><span class="method-badge get">GET</span></div>
+      <div>
+        <div class="endpoint-path">/breeze/status</div>
+        <div class="endpoint-desc">Timestamp of last saved Breeze session token</div>
+      </div>
+      <a href="/breeze/status" target="_blank" class="endpoint-link">Open ↗</a>
+    </div>
+    <div class="endpoint-row">
+      <div><span class="method-badge get">GET</span></div>
+      <div>
+        <div class="endpoint-path">/health</div>
+        <div class="endpoint-desc">Service health check — returns <code style="font-family:var(--mono);font-size:0.68rem;">{"status":"ok"}</code></div>
+      </div>
+      <a href="https://algostratgy-web-1018458560096.asia-south1.run.app/health" target="_blank" class="endpoint-link">Open ↗</a>
+    </div>
+  </div>
+
+  <!-- CLOUD RUN JOBS -->
+  <div class="section-label">Cloud Run Jobs</div>
+  <div class="jobs-table">
+    <div class="jobs-header">
+      <span>Job Name</span>
+      <span>Schedule (UTC)</span>
+      <span>Script</span>
+      <span>Status</span>
+    </div>
+    <div class="job-row">
+      <div class="job-name">
+        algostratgy-pipeline
+        <small>OHLC fetch + live update</small>
+      </div>
+      <div class="job-cell">44 3 * * 1–5</div>
+      <div class="job-cell">run_pipeline.sh</div>
+      <div class="job-cell dot-green">● ENABLED</div>
+    </div>
+    <div class="job-row">
+      <div class="job-name">
+        algostratgy-indicator-update
+        <small>Indicator calc + live loop</small>
+      </div>
+      <div class="job-cell">44 3 * * 1–5</div>
+      <div class="job-cell">run_indicators.sh</div>
+      <div class="job-cell dot-green">● ENABLED</div>
+    </div>
+    <div class="job-row">
+      <div class="job-name">
+        algostratgy-optionbuying-scheduled
+        <small>Signal eval + order placement</small>
+      </div>
+      <div class="job-cell">44 3 * * 1–5</div>
+      <div class="job-cell">optionbuying.py scheduled</div>
+      <div class="job-cell dot-green">● ENABLED</div>
+    </div>
+    <div class="job-row">
+      <div class="job-name">
+        algostratgy-order-stream
+        <small>WebSocket order tracking</small>
+      </div>
+      <div class="job-cell">44 3 * * 1–5</div>
+      <div class="job-cell">order_stream.py</div>
+      <div class="job-cell dot-green">● ENABLED</div>
+    </div>
+    <div class="job-row">
+      <div class="job-name">
+        algostratgy-indicators
+        <small>Full history recalculation (on-demand)</small>
+      </div>
+      <div class="job-cell">–</div>
+      <div class="job-cell">indicatordata_all.py</div>
+      <div class="job-cell dot-amber">◐ ON-DEMAND</div>
+    </div>
+    <div class="job-row">
+      <div class="job-name">
+        algostratgy-optionbuying
+        <small>Single signal eval (on-demand)</small>
+      </div>
+      <div class="job-cell">–</div>
+      <div class="job-cell">optionbuying.py once</div>
+      <div class="job-cell dot-amber">◐ ON-DEMAND</div>
+    </div>
+  </div>
+
+  <!-- DAILY CHECKLIST -->
+  <div class="section-label">Daily Pre-Market Checklist</div>
+  <div style="background:var(--bg2);border:1px solid var(--border);border-radius:6px;
+              padding:1.25rem 1.5rem; margin-bottom:2rem;">
+    <div style="display:grid;gap:0.6rem;">
+      <label class="step" style="cursor:pointer;">
+        <input type="checkbox" style="accent-color:var(--green);margin-top:3px;flex-shrink:0;">
+        <span><strong style="color:var(--text);">08:45 IST</strong> — Open Breeze login, complete 2FA, confirm callback redirect</span>
+      </label>
+      <label class="step" style="cursor:pointer;">
+        <input type="checkbox" style="accent-color:var(--green);margin-top:3px;flex-shrink:0;">
+        <span>Verify <code style="font-family:var(--mono);font-size:0.68rem;color:var(--amber);">/breeze/status</code> shows today's token timestamp</span>
+      </label>
+      <label class="step" style="cursor:pointer;">
+        <input type="checkbox" style="accent-color:var(--green);margin-top:3px;flex-shrink:0;">
+        <span><strong style="color:var(--text);">09:14 IST</strong> — All 4 schedulers auto-fire. Confirm jobs start in GCP console</span>
+      </label>
+      <label class="step" style="cursor:pointer;">
+        <input type="checkbox" style="accent-color:var(--green);margin-top:3px;flex-shrink:0;">
+        <span>Check <code style="font-family:var(--mono);font-size:0.68rem;color:var(--green);">/db</code> for non-zero row counts after 09:16</span>
+      </label>
+      <label class="step" style="cursor:pointer;">
+        <input type="checkbox" style="accent-color:var(--green);margin-top:3px;flex-shrink:0;">
+        <span>Monitor <code style="font-family:var(--mono);font-size:0.68rem;color:var(--blue);">/signals</code> from 09:20 for first option signal</span>
+      </label>
+    </div>
+  </div>
+
+</div>
+
+<!-- FOOTER -->
+<div class="footer">
+  <div class="footer-left">
+    ALGOSTRATGY · asia-south1 · algostratgy-sa@algostratgy.iam.gserviceaccount.com
+  </div>
+  <div class="footer-right">
+    <a href="https://console.cloud.google.com/run?project=algostratgy" target="_blank" class="btn btn-ghost" style="font-size:0.65rem; padding:3px 10px;">GCP Console ↗</a>
+    <a href="https://console.cloud.google.com/logs?project=algostratgy" target="_blank" class="btn btn-ghost" style="font-size:0.65rem; padding:3px 10px;">Cloud Logs ↗</a>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+  const BASE = 'https://algostratgy-web-1018458560096.asia-south1.run.app';
+
+  // ── Clock + market status ──────────────────────────────────────────────────
+  function updateClock() {
+    const now = new Date();
+    const ist = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+    const h = String(ist.getHours()).padStart(2,'0');
+    const m = String(ist.getMinutes()).padStart(2,'0');
+    const s = String(ist.getSeconds()).padStart(2,'0');
+    document.getElementById('clock').textContent = `${h}:${m}:${s} IST`;
+
+    const totalMin = ist.getHours() * 60 + ist.getMinutes();
+    const openMin  = 9 * 60 + 15;
+    const closeMin = 15 * 60 + 30;
+    const day = ist.getDay(); // 0=Sun, 6=Sat
+    const isWeekday = day >= 1 && day <= 5;
+    const isOpen = isWeekday && totalMin >= openMin && totalMin < closeMin;
+
+    const badge = document.getElementById('market-badge');
+    const stat  = document.getElementById('stat-market');
+    if (isOpen) {
+      badge.textContent = 'OPEN';
+      badge.className = 'market-badge open';
+      stat.textContent = 'OPEN';
+      stat.className = 'stat-value green';
+    } else {
+      badge.textContent = 'CLOSED';
+      badge.className = 'market-badge closed';
+      // time to next open
+      let next = '';
+      if (!isWeekday || totalMin >= closeMin) {
+        next = 'Opens next trading day';
+      } else {
+        const mins = openMin - totalMin;
+        next = `Opens in ${Math.floor(mins/60)}h ${mins%60}m`;
+      }
+      stat.textContent = 'CLOSED';
+      stat.className = 'stat-value red';
+    }
+  }
+  setInterval(updateClock, 1000);
+  updateClock();
+
+  // ── Toast ──────────────────────────────────────────────────────────────────
+  function showToast(msg) {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    setTimeout(() => t.classList.remove('show'), 2500);
+  }
+
+  // ── Fetch token status ─────────────────────────────────────────────────────
+  async function refreshTokenStatus() {
+    const el  = document.getElementById('token-detail');
+    const btn = document.getElementById('refresh-btn');
+    const statEl    = document.getElementById('stat-token');
+    const statSubEl = document.getElementById('stat-token-sub');
+    el.textContent = 'Fetching…';
+    btn.textContent = '↻ Fetching…';
+    try {
+      const r = await fetch('/breeze/status');
+      const j = await r.json();
+      el.textContent = JSON.stringify(j, null, 2);
+      if (j.last_saved) {
+        statEl.textContent = 'SAVED';
+        statEl.className = 'stat-value green';
+        // show time ago
+        const saved = new Date(j.last_saved);
+        const diffMin = Math.round((Date.now() - saved) / 60000);
+        statSubEl.textContent = diffMin < 60
+          ? `${diffMin}m ago`
+          : `${Math.floor(diffMin/60)}h ${diffMin%60}m ago`;
+        showToast('✓ Token status refreshed');
+      } else {
+        statEl.textContent = 'NOT SET';
+        statEl.className = 'stat-value red';
+        statSubEl.textContent = 'Login required';
+      }
+    } catch(e) {
+      el.textContent = 'Error fetching token status — service may be sleeping';
+      statEl.textContent = 'ERROR';
+      statEl.className = 'stat-value red';
+    }
+    btn.textContent = '↻ Refresh';
+  }
+
+  // ── Fetch DB row counts ────────────────────────────────────────────────────
+  async function fetchDBStatus() {
+    const rowEl    = document.getElementById('stat-rows');
+    const rowSubEl = document.getElementById('stat-rows-sub');
+    try {
+      const r = await fetch(`${BASE}/db`);
+      const j = await r.json();
+      // Expected keys: ohlctick_1mdata, indicators_data (or similar)
+      const keys = Object.keys(j).filter(k => typeof j[k] === 'number');
+      if (keys.length >= 2) {
+        rowEl.textContent = keys.map(k => j[k].toLocaleString()).join(' / ');
+        rowEl.className = 'stat-value green';
+        rowSubEl.textContent = keys.join(' / ');
+      } else if (keys.length === 1) {
+        rowEl.textContent = j[keys[0]].toLocaleString();
+        rowEl.className = 'stat-value';
+        rowSubEl.textContent = keys[0];
+      } else {
+        rowEl.textContent = JSON.stringify(j).slice(0,30);
+        rowEl.className = 'stat-value';
+      }
+    } catch(e) {
+      rowEl.textContent = 'unavailable';
+      rowEl.className = 'stat-value red';
+    }
+  }
+
+  // ── Init ───────────────────────────────────────────────────────────────────
+  refreshTokenStatus();
+  fetchDBStatus();
+</script>
+</body>
+</html>

@@ -1,0 +1,23 @@
+# 📁 Project Structure
+
+- 📁 algostrategy/
+  - 📄 Dockerfile
+  - 📄 cloud-run-job.yaml
+  - 📄 deploy.sh
+  - 📄 firebase.json
+  - 📄 main.py
+  - 📄 requirements.txt
+  - 📄 run_indicators.sh
+  - 📄 run_pipeline.sh
+  - 📄 show_data.py
+  - 📁 public/
+    - 📄 404.html
+    - 📄 index.html
+  - 📁 scripts/
+    - 📄 breeze_import.py
+    - 📄 indicator_update.py
+    - 📄 indicatordata_all.py
+    - 📄 optionbuying.py
+    - 📄 order_stream.py
+    - 📄 tvdata.py
+    - 📄 tvdata_update.py

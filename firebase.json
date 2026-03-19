@@ -1,0 +1,40 @@
+{
+  "hosting": {
+    "public": "public",
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**"
+    ],
+    "rewrites": [
+      {
+        "source": "/breeze/**",
+        "run": {
+          "serviceId": "algostratgy-web",
+          "region": "asia-south1"
+        }
+      },
+      {
+        "source": "/status",
+        "run": {
+          "serviceId": "algostratgy-web",
+          "region": "asia-south1"
+        }
+      },
+      {
+        "source": "/data",
+        "run": {
+          "serviceId": "algostratgy-web",
+          "region": "asia-south1"
+        }
+      },
+      {
+        "source": "/**",
+        "run": {
+          "serviceId": "algostratgy-web",
+          "region": "asia-south1"
+        }
+      }
+    ]
+  }
+}

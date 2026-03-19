@@ -3,3 +3,15 @@ autopep8
 Flask==3.0.3
 gunicorn==22.0.0
 Werkzeug==3.0.6
+aiomysql
+pandas
+numpy
+breeze-connect
+tradingview-datafeed
+python-dotenv
+cryptography
+TA-Lib==0.6.8
+pytz
+requests
+websocket-client
+google-cloud-secret-manager
