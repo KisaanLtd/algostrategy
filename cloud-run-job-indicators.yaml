@@ -1,0 +1,76 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  cloud-run-job-indicators.yaml  —  Indicator calculation pipeline
+#
+#  Runs run_indicators.sh:
+#    Step 1: indicatordata_all.py — truncate + full recalculate all indicators
+#    Step 2: indicator_update.py  — live per-minute loop until 15:30 IST
+#
+#  Schedule : 09:19 IST Mon–Fri  (= 03:49 UTC)
+#             5 min after tvdata job — ensures ohlctick tables are populated
+#  Deploy   : gcloud run jobs replace cloud-run-job-indicators.yaml --region asia-south1
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: run.googleapis.com/v1
+kind: Job
+metadata:
+  name: algostrategy-indicators
+  annotations:
+    run.googleapis.com/launch-stage: GA
+spec:
+  template:
+    spec:
+      taskCount: 1
+      template:
+        spec:
+          timeoutSeconds: 24300
+          # One retry — indicatordata_all.py truncates before recalc so
+          # a retry is always safe (idempotent).
+          maxRetries: 1
+          containers:
+            - image: gcr.io/algostratgy/algostrategy:latest
+              command: ["bash", "run_indicators.sh"]
+              resources:
+                limits:
+                  cpu: "1"
+                  memory: "1Gi"
+              env:
+                - name: DB_HOST
+                  valueFrom:
+                    secretKeyRef:
+                      name: db-host
+                      key: latest
+                - name: DB_PORT
+                  valueFrom:
+                    secretKeyRef:
+                      name: db-port
+                      key: latest
+                - name: DB_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: db-user
+                      key: latest
+                - name: DB_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: db-password
+                      key: latest
+                - name: DB_NAME
+                  valueFrom:
+                    secretKeyRef:
+                      name: db-name
+                      key: latest
+                - name: API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: breeze-api-key
+                      key: latest
+                - name: API_SECRET
+                  valueFrom:
+                    secretKeyRef:
+                      name: breeze-api-secret
+                      key: latest
+                - name: SESSION_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: breeze-session-token
+                      key: latest
+          serviceAccountName: algostratgy-sa@algostratgy.iam.gserviceaccount.com

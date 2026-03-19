@@ -1,29 +1,39 @@
-# ─────────────────────────────────────────────
-#  cloud-run-job.yaml
-#  Deploy as: gcloud run jobs replace cloud-run-job.yaml
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+#  cloud-run-job-tvdata.yaml  —  BankNifty OHLC data pipeline
+#
+#  Runs run_pipeline.sh:
+#    Step 1: tvdata.py        — truncate + bulk fetch 1000 bars via TV / Breeze
+#    Step 2: tvdata_update.py — live per-minute loop until 15:30 IST
+#
+#  Schedule : 09:14 IST Mon–Fri  (= 03:44 UTC)
+#  Deploy   : gcloud run jobs replace cloud-run-job-tvdata.yaml --region asia-south1
+# ─────────────────────────────────────────────────────────────────────────────
 apiVersion: run.googleapis.com/v1
 kind: Job
 metadata:
-  name: algostrategy-pipeline
+  name: algostrategy-tvdata
   annotations:
     run.googleapis.com/launch-stage: GA
 spec:
   template:
     spec:
       taskCount: 1
-      timeoutSeconds: 3600       # 1 hour max per run (covers full market session)
       template:
         spec:
+          # Full session 09:14→15:30 = 376 min; 24300s = 405 min with buffer
+          timeoutSeconds: 24300
+          # Retry up to 2 times on non-zero exit (crash / OOM).
+          # Gap-filler in check_missing_or_duplicate_keys heals missed candles
+          # automatically on restart via Breeze multi-day fallback.
+          maxRetries: 2
           containers:
             - image: gcr.io/algostratgy/algostrategy:latest
-              command: ["python", "scripts/tvdata_update.py"]
+              command: ["bash", "run_pipeline.sh"]
               resources:
                 limits:
                   cpu: "1"
                   memory: "1Gi"
               env:
-                # ── Load all secrets from Secret Manager ──
                 - name: DB_HOST
                   valueFrom:
                     secretKeyRef:
@@ -64,4 +74,4 @@ spec:
                     secretKeyRef:
                       name: breeze-session-token
                       key: latest   # Update this secret daily before market open
-          serviceAccountName: algostrategy-sa@algostratgy.iam.gserviceaccount.com
+          serviceAccountName: algostratgy-sa@algostratgy.iam.gserviceaccount.com
