@@ -53,35 +53,126 @@ ENV PORT=8080
 CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "2", "--timeout", "120", "main:app"]
 ```
 
-### 📄 cloud-run-job.yaml
+### 📄 cloud-run-job-indicators.yaml
 
 ```yaml
-# ─────────────────────────────────────────────
-#  cloud-run-job.yaml
-#  Deploy as: gcloud run jobs replace cloud-run-job.yaml
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+#  cloud-run-job-indicators.yaml  —  Indicator calculation pipeline
+#
+#  Runs run_indicators.sh:
+#    Step 1: indicatordata_all.py — truncate + full recalculate all indicators
+#    Step 2: indicator_update.py  — live per-minute loop until 15:30 IST
+#
+#  Schedule : 09:19 IST Mon–Fri  (= 03:49 UTC)
+#             5 min after tvdata job — ensures ohlctick tables are populated
+#  Deploy   : gcloud run jobs replace cloud-run-job-indicators.yaml --region asia-south1
+# ─────────────────────────────────────────────────────────────────────────────
 apiVersion: run.googleapis.com/v1
 kind: Job
 metadata:
-  name: algostrategy-pipeline
+  name: algostrategy-indicators
   annotations:
     run.googleapis.com/launch-stage: GA
 spec:
   template:
     spec:
       taskCount: 1
-      timeoutSeconds: 3600       # 1 hour max per run (covers full market session)
       template:
         spec:
+          timeoutSeconds: 24300
+          # One retry — indicatordata_all.py truncates before recalc so
+          # a retry is always safe (idempotent).
+          maxRetries: 1
           containers:
             - image: gcr.io/algostratgy/algostrategy:latest
-              command: ["python", "scripts/tvdata_update.py"]
+              command: ["bash", "run_indicators.sh"]
               resources:
                 limits:
                   cpu: "1"
                   memory: "1Gi"
               env:
-                # ── Load all secrets from Secret Manager ──
+                - name: DB_HOST
+                  valueFrom:
+                    secretKeyRef:
+                      name: db-host
+                      key: latest
+                - name: DB_PORT
+                  valueFrom:
+                    secretKeyRef:
+                      name: db-port
+                      key: latest
+                - name: DB_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: db-user
+                      key: latest
+                - name: DB_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: db-password
+                      key: latest
+                - name: DB_NAME
+                  valueFrom:
+                    secretKeyRef:
+                      name: db-name
+                      key: latest
+                - name: API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: breeze-api-key
+                      key: latest
+                - name: API_SECRET
+                  valueFrom:
+                    secretKeyRef:
+                      name: breeze-api-secret
+                      key: latest
+                - name: SESSION_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: breeze-session-token
+                      key: latest
+          serviceAccountName: algostratgy-sa@algostratgy.iam.gserviceaccount.com
+```
+
+### 📄 cloud-run-job-tvdata.yaml
+
+```yaml
+# ─────────────────────────────────────────────────────────────────────────────
+#  cloud-run-job-tvdata.yaml  —  BankNifty OHLC data pipeline
+#
+#  Runs run_pipeline.sh:
+#    Step 1: tvdata.py        — truncate + bulk fetch 1000 bars via TV / Breeze
+#    Step 2: tvdata_update.py — live per-minute loop until 15:30 IST
+#
+#  Schedule : 09:14 IST Mon–Fri  (= 03:44 UTC)
+#  Deploy   : gcloud run jobs replace cloud-run-job-tvdata.yaml --region asia-south1
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: run.googleapis.com/v1
+kind: Job
+metadata:
+  name: algostrategy-tvdata
+  annotations:
+    run.googleapis.com/launch-stage: GA
+spec:
+  template:
+    spec:
+      taskCount: 1
+      template:
+        spec:
+          # Full session 09:14→15:30 = 376 min; 24300s = 405 min with buffer
+          timeoutSeconds: 24300
+          # Retry up to 2 times on non-zero exit (crash / OOM).
+          # Gap-filler in check_missing_or_duplicate_keys heals missed candles
+          # automatically on restart via Breeze multi-day fallback.
+          maxRetries: 2
+          containers:
+            - image: gcr.io/algostratgy/algostrategy:latest
+              command: ["bash", "run_pipeline.sh"]
+              resources:
+                limits:
+                  cpu: "1"
+                  memory: "1Gi"
+              env:
                 - name: DB_HOST
                   valueFrom:
                     secretKeyRef:
@@ -122,27 +213,32 @@ spec:
                     secretKeyRef:
                       name: breeze-session-token
                       key: latest   # Update this secret daily before market open
-          serviceAccountName: algostrategy-sa@algostratgy.iam.gserviceaccount.com
+          serviceAccountName: algostratgy-sa@algostratgy.iam.gserviceaccount.com
 ```
 
 ### 📄 deploy.sh
 
 ```sh
 #!/bin/bash
-# ─────────────────────────────────────────────
-#  deploy.sh — One-time GCP setup for algostrategy
-#  Run from your local machine with gcloud CLI installed
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+#  deploy.sh — Full GCP setup for algostrategy
+#  Run once from your local machine with gcloud CLI installed.
+#  Safe to re-run — secrets use --data-file=- which creates a new version
+#  if the secret already exists (use 'gcloud secrets versions add' on re-runs).
+# ─────────────────────────────────────────────────────────────────────────────
+set -e
 
-PROJECT_ID="algostratgy"         # ← CHANGE THIS
-REGION="asia-south1"                       # Mumbai — closest to NSE
+PROJECT_ID="algostratgy"
+REGION="asia-south1"                  # Mumbai — closest to NSE
 IMAGE="gcr.io/$PROJECT_ID/algostrategy"
 SA_NAME="algostrategy-sa"
+SA_EMAIL="$SA_NAME@$PROJECT_ID.iam.gserviceaccount.com"
 
-echo "==> Setting project"
+echo "==> Setting project to $PROJECT_ID"
 gcloud config set project $PROJECT_ID
 
-# ── Enable required APIs ──────────────────────
+# ── Enable required APIs ──────────────────────────────────────────────────────
+echo ""
 echo "==> Enabling APIs"
 gcloud services enable \
   run.googleapis.com \
@@ -151,67 +247,148 @@ gcloud services enable \
   containerregistry.googleapis.com \
   cloudbuild.googleapis.com
 
-# ── Create Service Account ────────────────────
+# ── Service Account ───────────────────────────────────────────────────────────
+echo ""
 echo "==> Creating service account"
 gcloud iam service-accounts create $SA_NAME \
-  --display-name="AlgoStrategy Runner"
+  --display-name="AlgoStrategy Runner" 2>/dev/null || \
+  echo "  (service account already exists — skipping)"
 
 gcloud projects add-iam-policy-binding $PROJECT_ID \
-  --member="serviceAccount:$SA_NAME@$PROJECT_ID.iam.gserviceaccount.com" \
+  --member="serviceAccount:$SA_EMAIL" \
   --role="roles/secretmanager.secretAccessor"
 
 gcloud projects add-iam-policy-binding $PROJECT_ID \
-  --member="serviceAccount:$SA_NAME@$PROJECT_ID.iam.gserviceaccount.com" \
+  --member="serviceAccount:$SA_EMAIL" \
   --role="roles/run.invoker"
 
-# ── Store secrets in Secret Manager ──────────
-echo "==> Creating secrets (fill values when prompted)"
-for SECRET in db-host db-port db-user db-password db-name breeze-api-key breeze-api-secret breeze-session-token; do
+# ── Secrets ───────────────────────────────────────────────────────────────────
+echo ""
+echo "==> Creating secrets in Secret Manager"
+for SECRET in db-host db-port db-user db-password db-name \
+              breeze-api-key breeze-api-secret breeze-session-token; do
   read -sp "Enter value for $SECRET: " SECRET_VALUE
   echo ""
-  echo -n "$SECRET_VALUE" | gcloud secrets create $SECRET --data-file=-
+  # Create if not exists; otherwise add a new version
+  if gcloud secrets describe $SECRET &>/dev/null; then
+    echo -n "$SECRET_VALUE" | gcloud secrets versions add $SECRET --data-file=-
+    echo "  $SECRET: new version added"
+  else
+    echo -n "$SECRET_VALUE" | gcloud secrets create $SECRET --data-file=-
+    echo "  $SECRET: created"
+  fi
 done
 
-# ── Copy ca.pem into Secret Manager ──────────
+echo ""
 echo "==> Storing ca.pem as secret"
-gcloud secrets create db-ca-cert --data-file=ca.pem
+if gcloud secrets describe db-ca-cert &>/dev/null; then
+  gcloud secrets versions add db-ca-cert --data-file=ca.pem
+  echo "  db-ca-cert: new version added"
+else
+  gcloud secrets create db-ca-cert --data-file=ca.pem
+  echo "  db-ca-cert: created"
+fi
 
-# ── Build and push Docker image ───────────────
-echo "==> Building Docker image (this takes ~5-8 min for TA-Lib compile)"
+# ── Docker image ──────────────────────────────────────────────────────────────
+echo ""
+echo "==> Building and pushing Docker image (~5-8 min for TA-Lib compile)"
 gcloud builds submit --tag $IMAGE .
 
-# ── Deploy Flask service (main.py) ────────────
-echo "==> Deploying Flask web service"
+# ── Flask web service ─────────────────────────────────────────────────────────
+echo ""
+echo "==> Deploying Flask web service (main.py)"
 gcloud run deploy algostrategy-web \
   --image=$IMAGE \
   --platform=managed \
   --region=$REGION \
-  --service-account="$SA_NAME@$PROJECT_ID.iam.gserviceaccount.com" \
+  --service-account="$SA_EMAIL" \
   --no-allow-unauthenticated \
   --memory=512Mi \
   --cpu=1 \
   --min-instances=0 \
   --max-instances=2
 
-# ── Deploy data pipeline as Cloud Run Job ─────
-echo "==> Deploying tvdata pipeline Job"
-gcloud run jobs replace cloud-run-job.yaml \
-  --region=$REGION
+# ── Cloud Run Jobs ────────────────────────────────────────────────────────────
+echo ""
+echo "==> Deploying Cloud Run Jobs"
 
-# ── Schedule Job at 09:14 IST Mon–Fri ─────────
-echo "==> Creating Cloud Scheduler trigger"
-gcloud scheduler jobs create http algostrategy-market-trigger \
-  --schedule="44 3 * * 1-5" \
-  --time-zone="UTC" \
-  --uri="https://run.googleapis.com/v2/projects/$PROJECT_ID/locations/$REGION/jobs/algostrategy-pipeline:run" \
-  --http-method=POST \
-  --oauth-service-account-email="$SA_NAME@$PROJECT_ID.iam.gserviceaccount.com" \
-  --location=$REGION
+# Job 1: OHLC data pipeline  (run_pipeline.sh)
+#   Step 1 — tvdata.py        : truncate + bulk fetch 1000 bars via TV/Breeze
+#   Step 2 — tvdata_update.py : live per-minute loop until 15:30
+echo "  Deploying algostrategy-tvdata job..."
+gcloud run jobs replace cloud-run-job-tvdata.yaml --region=$REGION
 
+# Job 2: Indicator pipeline   (run_indicators.sh)
+#   Step 1 — indicatordata_all.py : truncate + full recalculate all indicators
+#   Step 2 — indicator_update.py  : live per-minute loop until 15:30
+echo "  Deploying algostrategy-indicators job..."
+gcloud run jobs replace cloud-run-job-indicators.yaml --region=$REGION
+
+# ── Cloud Scheduler triggers ──────────────────────────────────────────────────
+echo ""
+echo "==> Setting up Cloud Scheduler triggers"
+
+# Helper: update or create a scheduler trigger
+_upsert_scheduler() {
+  local NAME=$1 SCHEDULE=$2 URI=$3
+  if gcloud scheduler jobs describe $NAME --location=$REGION &>/dev/null; then
+    gcloud scheduler jobs update http $NAME \
+      --schedule="$SCHEDULE" \
+      --time-zone="UTC" \
+      --uri="$URI" \
+      --http-method=POST \
+      --oauth-service-account-email="$SA_EMAIL" \
+      --location=$REGION
+    echo "  $NAME: updated"
+  else
+    gcloud scheduler jobs create http $NAME \
+      --schedule="$SCHEDULE" \
+      --time-zone="UTC" \
+      --uri="$URI" \
+      --http-method=POST \
+      --oauth-service-account-email="$SA_EMAIL" \
+      --location=$REGION
+    echo "  $NAME: created"
+  fi
+}
+
+BASE_URI="https://run.googleapis.com/v2/projects/$PROJECT_ID/locations/$REGION/jobs"
+
+# tvdata job    → 09:14 IST = 03:44 UTC
+_upsert_scheduler \
+  "algostrategy-tvdata-trigger" \
+  "44 3 * * 1-5" \
+  "$BASE_URI/algostrategy-tvdata:run"
+
+# indicators job → 09:19 IST = 03:49 UTC
+# 5-min gap gives tvdata Step 1 (bulk fetch) time to complete first
+_upsert_scheduler \
+  "algostrategy-indicators-trigger" \
+  "49 3 * * 1-5" \
+  "$BASE_URI/algostrategy-indicators:run"
+
+# ── Cleanup note ──────────────────────────────────────────────────────────────
 echo ""
 echo "✅ Deployment complete!"
-echo "   Web service: https://algostrategy-web-xxxx-$REGION.run.app"
-echo "   Pipeline Job: runs weekdays at 09:14 IST"
+echo ""
+echo "   Web service  : https://algostrategy-web-xxxx-$REGION.run.app"
+echo ""
+echo "   Jobs and schedules:"
+echo "   ┌─────────────────────────────┬────────────┬─────────────────────────────────────────┐"
+echo "   │ Job                         │ IST Start  │ Script                                  │"
+echo "   ├─────────────────────────────┼────────────┼─────────────────────────────────────────┤"
+echo "   │ algostrategy-tvdata         │ 09:14      │ run_pipeline.sh                         │"
+echo "   │                             │            │   1. tvdata.py (truncate + bulk fetch)  │"
+echo "   │                             │            │   2. tvdata_update.py (live loop)       │"
+echo "   ├─────────────────────────────┼────────────┼─────────────────────────────────────────┤"
+echo "   │ algostrategy-indicators     │ 09:19      │ run_indicators.sh                       │"
+echo "   │                             │            │   1. indicatordata_all.py (truncate+calc│"
+echo "   │                             │            │   2. indicator_update.py (live loop)    │"
+echo "   └─────────────────────────────┴────────────┴─────────────────────────────────────────┘"
+echo ""
+echo "   If old job 'algostrategy-pipeline' still exists, delete it:"
+echo "   gcloud run jobs delete algostrategy-pipeline --region $REGION"
+echo "   gcloud scheduler jobs delete algostrategy-market-trigger --location $REGION"
 ```
 
 ### 📄 firebase.json
@@ -1951,6 +2128,288 @@ if __name__ == "__main__":
 
 ## 📁 scripts/
 
+### 📄 scripts/breeze_fetch_test.py
+
+```py
+"""
+breeze_fetch_test.py
+────────────────────
+Standalone test for Breeze API BankNifty OHLC fetch.
+Run from the algostrategy/ root (so .env is found):
+
+    python scripts/breeze_fetch_test.py            # fetch both 1m and 5m
+    python scripts/breeze_fetch_test.py 1m         # fetch 1m only
+    python scripts/breeze_fetch_test.py 5m         # fetch 5m only
+    python scripts/breeze_fetch_test.py 1m 200     # fetch 200 bars of 1m
+    python scripts/breeze_fetch_test.py 5m 30      # fetch 30 bars of 5m
+
+Credentials are read from environment variables (same as the main pipeline):
+    API_KEY, API_SECRET, SESSION_TOKEN
+
+Load them via .env or export them in your shell before running.
+"""
+
+import os
+import sys
+import pytz
+import pandas as pd
+from datetime import datetime, timedelta
+from dotenv import load_dotenv
+from breeze_connect import BreezeConnect
+
+load_dotenv()   # picks up .env in cwd if present
+
+IST = pytz.timezone('Asia/Kolkata')
+
+# ── Constants ─────────────────────────────────────────────────────────────────
+MARKET_OPEN_H,  MARKET_OPEN_M  = 9,  15
+MARKET_CLOSE_H, MARKET_CLOSE_M = 15, 30
+SESSION_MINUTES = 375   # 09:15 – 15:30
+
+# get_historical_data (v1) interval strings
+BREEZE_INTERVAL = {
+    '1m': '1minute',
+    '5m': '5minute',
+}
+
+DEFAULT_N_BARS = {
+    '1m': 750,
+    '5m': 75,
+}
+
+
+# ── Breeze session ────────────────────────────────────────────────────────────
+
+def get_breeze() -> BreezeConnect:
+    api_key       = os.getenv("API_KEY")
+    api_secret    = os.getenv("API_SECRET")
+    session_token = os.getenv("SESSION_TOKEN")
+
+    missing = [k for k, v in {
+        "API_KEY": api_key, "API_SECRET": api_secret,
+        "SESSION_TOKEN": session_token,
+    }.items() if not v]
+    if missing:
+        raise EnvironmentError(
+            f"Missing environment variables: {', '.join(missing)}\n"
+            "Set them in your shell or in a .env file."
+        )
+
+    print(f"[Breeze] Connecting with API_KEY={api_key[:6]}...")
+    breeze = BreezeConnect(api_key=api_key)
+    breeze.generate_session(api_secret=api_secret, session_token=str(session_token))
+    print("[Breeze] Session initialised.\n")
+    return breeze
+
+
+def is_business_day(date) -> bool:
+    holidays = [
+        "2025-02-26","2025-03-14","2025-03-31","2025-04-10","2025-04-14",
+        "2025-04-18","2025-05-01","2025-08-15","2025-08-27","2025-10-02",
+        "2025-10-21","2025-10-22","2025-11-05","2025-11-15","2025-12-25",
+        "2026-01-26","2026-03-03","2026-03-26","2026-03-31","2026-04-03",
+        "2026-04-14","2026-05-01","2026-05-28","2026-06-26","2026-09-14",
+        "2026-10-02","2026-10-20","2026-11-10","2026-11-24","2026-12-25",
+    ]
+    return date.weekday() < 5 and date.strftime('%Y-%m-%d') not in holidays
+
+
+# ── Single-session fetch ──────────────────────────────────────────────────────
+
+def fetch_session(breeze: BreezeConnect,
+                  interval: str,
+                  from_str: str,
+                  to_str: str,
+                  timeframe: str) -> pd.DataFrame:
+    """
+    Fetch one market session from Breeze. Returns clean [datetime, open, high,
+    low, close] DataFrame (market-hours only, tz-naive IST), or empty on failure.
+    """
+    try:
+        resp = breeze.get_historical_data(
+            interval      = interval,
+            from_date     = from_str,
+            to_date       = to_str,
+            stock_code    = "CNXBAN",
+            exchange_code = "NSE",
+            product_type  = "cash",
+        )
+        if not resp or resp.get('Status') != 200:
+            print(f"  [ERROR] Status={resp.get('Status') if resp else 'None'} "
+                  f"Error={resp.get('Error','unknown') if resp else ''}")
+            return pd.DataFrame()
+
+        records = resp.get('Success') or []
+        if not records:
+            print(f"  [ERROR] Empty Success payload for {from_str}.")
+            return pd.DataFrame()
+
+        df = pd.DataFrame(records)
+        df['datetime'] = pd.to_datetime(df['datetime'])
+        if df['datetime'].dt.tz is not None:
+            df['datetime'] = df['datetime'].dt.tz_localize(None)
+
+        for col in ['open', 'high', 'low', 'close']:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+
+        df.dropna(subset=['open', 'high', 'low', 'close'], inplace=True)
+        df = df[df['open'] != 0].copy()
+
+        # Market hours only
+        t = df['datetime'].dt.time
+        df = df[(t >= datetime.strptime('09:15','%H:%M').time()) &
+                (t <= datetime.strptime('15:30','%H:%M').time())].copy()
+
+        print(f"  → {len(df)} bars from {from_str}")
+        return df[['datetime', 'open', 'high', 'low', 'close']]
+
+    except Exception as e:
+        print(f"  [ERROR] Session fetch failed: {e}")
+        return pd.DataFrame()
+
+
+# ── Core fetch (multi-day loop) ───────────────────────────────────────────────
+
+def fetch_banknifty(breeze: BreezeConnect,
+                    timeframe: str = '1m',
+                    n_bars: int    = 750) -> pd.DataFrame:
+    """
+    Fetch n_bars BankNifty candles from Breeze get_historical_data (v1).
+
+    Fetches today's session first, then walks back one business day at a time
+    (up to 10 calendar days) until n_bars is satisfied — same strategy as the
+    original IndexHistoricalData.fetch_index_data_with_min_rows().
+
+    stock_code="CNXBAN", exchange_code="NSE", product_type="cash"
+    No expiry / right / strike_price required.
+
+    Returns
+    -------
+    pd.DataFrame  columns: [datetime, open, high, low, close, ohlc4]
+    datetime is tz-naive IST, sorted ascending. Empty DataFrame on failure.
+    """
+    if timeframe not in BREEZE_INTERVAL:
+        raise ValueError(f"timeframe must be '1m' or '5m', got '{timeframe}'")
+
+    interval = BREEZE_INTERVAL[timeframe]
+    fmt      = '%Y-%m-%d %H:%M:%S'
+    now_ist  = datetime.now(IST)
+    today    = now_ist.date()
+
+    combined = pd.DataFrame()
+
+    # ── Step 1: today's session ───────────────────────────────────────────────
+    today_start = datetime.combine(today, datetime.strptime('09:15','%H:%M').time())
+    today_end   = now_ist.replace(hour=MARKET_CLOSE_H, minute=MARKET_CLOSE_M,
+                                   second=0, microsecond=0).replace(tzinfo=None)
+    print(f"[Breeze/{timeframe}] Today: {today_start.strftime(fmt)} → {today_end.strftime(fmt)}")
+    day_df = fetch_session(breeze, interval,
+                           today_start.strftime(fmt), today_end.strftime(fmt), timeframe)
+    if not day_df.empty:
+        combined = day_df
+
+    # ── Step 2: walk back until n_bars met ────────────────────────────────────
+    lookback_day = today - timedelta(days=1)
+    cutoff       = today - timedelta(days=10)
+
+    while len(combined) < n_bars and lookback_day >= cutoff:
+        if not is_business_day(lookback_day):
+            lookback_day -= timedelta(days=1)
+            continue
+
+        d_start = datetime.combine(lookback_day, datetime.strptime('09:15','%H:%M').time())
+        d_end   = datetime.combine(lookback_day, datetime.strptime('15:30','%H:%M').time())
+        print(f"[Breeze/{timeframe}] Prior session ({lookback_day}): "
+              f"have {len(combined)}/{n_bars} bars")
+        day_df = fetch_session(breeze, interval,
+                               d_start.strftime(fmt), d_end.strftime(fmt), timeframe)
+        if not day_df.empty:
+            combined = pd.concat([day_df, combined], ignore_index=True)
+
+        lookback_day -= timedelta(days=1)
+
+    if combined.empty:
+        print(f"[Breeze/{timeframe}] No data collected.")
+        return pd.DataFrame()
+
+    if len(combined) < n_bars:
+        print(f"[Breeze/{timeframe}] Only {len(combined)} bars available "
+              f"(needed {n_bars}) — proceeding with what we have.")
+
+    # ── Finalise ──────────────────────────────────────────────────────────────
+    combined.sort_values('datetime', inplace=True)
+    combined.drop_duplicates(subset='datetime', keep='last', inplace=True)
+    combined.reset_index(drop=True, inplace=True)
+
+    combined['ohlc4'] = ((combined['open'] + combined['high'] +
+                          combined['low']  + combined['close']) / 4).round(2)
+
+    combined = combined.tail(n_bars).reset_index(drop=True)
+
+    print(f"[Breeze/{timeframe}] Returning {len(combined)} bars.")
+    return combined[['datetime', 'open', 'high', 'low', 'close', 'ohlc4']]
+
+
+# ── Pretty printer ────────────────────────────────────────────────────────────
+
+def print_summary(df: pd.DataFrame, timeframe: str, n_bars: int):
+    if df.empty:
+        print(f"\n[{timeframe}] ✗  No data returned.\n")
+        return
+
+    print(f"\n[{timeframe}] ✓  {len(df)} bars returned  (requested {n_bars})")
+    print(f"  First : {df['datetime'].iloc[0]}  |  close={df['close'].iloc[0]:.2f}")
+    print(f"  Last  : {df['datetime'].iloc[-1]}  |  close={df['close'].iloc[-1]:.2f}")
+    print(f"  High  : {df['high'].max():.2f}    Low : {df['low'].min():.2f}")
+    print(f"\n--- Last 5 rows ---")
+    pd.set_option('display.float_format', '{:.2f}'.format)
+    pd.set_option('display.width', 120)
+    print(df.tail(5).to_string(index=False))
+    print()
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+
+def main():
+    args = sys.argv[1:]
+
+    # Parse timeframe argument
+    if args and args[0] in ('1m', '5m'):
+        timeframes = [args[0]]
+        args = args[1:]
+    else:
+        timeframes = ['1m', '5m']   # default: test both
+
+    # Parse optional n_bars argument
+    n_bars_override = None
+    if args:
+        try:
+            n_bars_override = int(args[0])
+        except ValueError:
+            print(f"[WARN] Ignoring unrecognised argument: {args[0]}")
+
+    breeze = get_breeze()
+
+    for tf in timeframes:
+        n_bars = n_bars_override if n_bars_override else DEFAULT_N_BARS[tf]
+        print(f"{'='*60}")
+        print(f" Fetching {tf} BankNifty  |  n_bars={n_bars}")
+        print(f"{'='*60}")
+
+        df = fetch_banknifty(breeze, timeframe=tf, n_bars=n_bars)
+        print_summary(df, tf, n_bars)
+
+        # Add hlc3 for 5m — mirrors what the pipeline stores in ohlctick_5mdata
+        if tf == '5m' and not df.empty:
+            df['hlc3'] = ((df['high'] + df['low'] + df['close']) / 3).round(2)
+            print("  hlc3 sample (last 3):", df['hlc3'].tail(3).tolist())
+            print()
+
+
+if __name__ == '__main__':
+    main()
+```
+
 ### 📄 scripts/breeze_import.py
 
 ```py
@@ -2147,9 +2606,11 @@ class IndicatorUpdate:
                         open          DOUBLE, high  DOUBLE, low   DOUBLE, close DOUBLE,
                         ohlc4         DOUBLE,
                         linearreg     DOUBLE,
-                        lri_slope     DOUBLE, lri_intercept DOUBLE,
+                        lri_intercept DOUBLE,
                         lri_curve     DOUBLE, lri_angle     DOUBLE,
+                        lri_angle_diff DOUBLE,
                         ema26         DOUBLE,
+                        wma_half      DOUBLE,  wma_full     DOUBLE,
                         hma26_5m      DOUBLE,
                         BuyCall       INTEGER, BuyPut  INTEGER,
                         Bull          INTEGER, Bear    INTEGER,
@@ -2236,29 +2697,40 @@ class IndicatorUpdate:
                 return data
 
     # ── HMA (5-min) → forward-fill onto 1-min index ──────────────────────────
-    def _hma(self, series: pd.Series, length: int) -> pd.Series:
-        half  = max(1, length // 2)
-        sqrtn = max(1, int(np.floor(np.sqrt(length))))
-        wma_half = talib.WMA(series, timeperiod=half)
-        wma_full = talib.WMA(series, timeperiod=length)
-        diff     = 2 * wma_half - wma_full
-        return talib.WMA(diff, timeperiod=sqrtn)
-    # ── HMA (5-min) → forward-fill onto 1-min index ──────────────────────────
+
+    def _hma(self, series: pd.Series, length: int):
+        """Returns (hma, wma_half, wma_full) as pd.Series — all on the same index."""
+        half      = max(1, length // 2)
+        sqrtn     = max(1, int(np.floor(np.sqrt(length))))
+        wma_half  = talib.WMA(series, timeperiod=half)
+        wma_full  = talib.WMA(series, timeperiod=length)
+        diff      = 2 * wma_half - wma_full
+        hma       = talib.WMA(diff, timeperiod=sqrtn)
+        return hma, wma_half, wma_full
 
     def merge_hma26_5m(self, data_1m, data_5m):
         df5 = data_5m.copy()
         df5['datetime'] = pd.to_datetime(df5['datetime'])
         df5.set_index('datetime', inplace=True)
-        df5['hma26_5m'] = self._hma(df5['hlc3'], 26).round(2)
+
+        hma, wma_half, wma_full = self._hma(df5['hlc3'], 26)
+        df5['hma26_5m'] = hma.round(2)
+        df5['wma_half'] = wma_half.round(2)   # wma(13) of hlc3 on 5m bars
+        df5['wma_full'] = wma_full.round(2)   # wma(26) of hlc3 on 5m bars
 
         df1 = data_1m.copy()
         df1['datetime'] = pd.to_datetime(df1['datetime'])
         df1.set_index('datetime', inplace=True)
+
+        # Forward-fill all three 5-min series onto the 1-min index
         df1['hma26_5m'] = df5['hma26_5m'].reindex(df1.index, method='ffill')
+        df1['wma_half'] = df5['wma_half'].reindex(df1.index, method='ffill')
+        df1['wma_full'] = df5['wma_full'].reindex(df1.index, method='ffill')
+
         df1.reset_index(inplace=True)
         return df1
 
-    # ── Indicator calculations (unchanged) ───────────────────────────────────
+    # ── Indicator calculations ────────────────────────────────────────────────
 
     async def calculate_vstop(self, data):
         data['ATR']      = talib.ATR(data['high'], data['low'], data['close'], timeperiod=252)
@@ -2281,53 +2753,56 @@ class IndicatorUpdate:
             atr_m2 = data['ATR'].iloc[i] * 2
             atr_m3 = data['ATR'].iloc[i] * 3
 
-            data.at[i, 'Max'] = max(data['Max'].iloc[i - 1], src)
-            data.at[i, 'Min'] = min(data['Min'].iloc[i - 1], src)
+            data.at[i, 'Max'] = max(data['Max'].iloc[i-1], src)
+            data.at[i, 'Min'] = min(data['Min'].iloc[i-1], src)
 
-            prev2 = data['VStop2'].iloc[i - 1]
-            if data['TrendUp2'].iloc[i - 1]:
+            prev2 = data['VStop2'].iloc[i-1]
+            if data['TrendUp2'].iloc[i-1]:
                 data.at[i, 'VStop2'] = max(prev2 if not np.isnan(prev2) else src,
                                            data['Max'].iloc[i] - atr_m2)
             else:
                 data.at[i, 'VStop2'] = min(prev2 if not np.isnan(prev2) else src,
                                            data['Min'].iloc[i] + atr_m2)
             data.at[i, 'TrendUp2'] = src >= data['VStop2'].iloc[i]
-            if data['TrendUp2'].iloc[i] != data['TrendUp2'].iloc[i - 1]:
-                data.at[i, 'Max']    = src
-                data.at[i, 'Min']    = src
+            if data['TrendUp2'].iloc[i] != data['TrendUp2'].iloc[i-1]:
+                data.at[i, 'Max']    = src; data.at[i, 'Min']    = src
                 data.at[i, 'VStop2'] = (data['Max'].iloc[i] - atr_m2
                                         if data['TrendUp2'].iloc[i]
                                         else data['Min'].iloc[i] + atr_m2)
 
-            prev3 = data['VStop3'].iloc[i - 1]
-            if data['TrendUp3'].iloc[i - 1]:
+            prev3 = data['VStop3'].iloc[i-1]
+            if data['TrendUp3'].iloc[i-1]:
                 data.at[i, 'VStop3'] = max(prev3 if not np.isnan(prev3) else src,
                                            data['Max'].iloc[i] - atr_m3)
             else:
                 data.at[i, 'VStop3'] = min(prev3 if not np.isnan(prev3) else src,
                                            data['Min'].iloc[i] + atr_m3)
             data.at[i, 'TrendUp3'] = src >= data['VStop3'].iloc[i]
-            if data['TrendUp3'].iloc[i] != data['TrendUp3'].iloc[i - 1]:
-                data.at[i, 'Max']    = src
-                data.at[i, 'Min']    = src
+            if data['TrendUp3'].iloc[i] != data['TrendUp3'].iloc[i-1]:
+                data.at[i, 'Max']    = src; data.at[i, 'Min']    = src
                 data.at[i, 'VStop3'] = (data['Max'].iloc[i] - atr_m3
                                         if data['TrendUp3'].iloc[i]
                                         else data['Min'].iloc[i] + atr_m3)
 
-            v2_now  = data['VStop2'].iloc[i];  v3_now  = data['VStop3'].iloc[i]
-            v2_prev = data['VStop2'].iloc[i-1]; v3_prev = data['VStop3'].iloc[i-1]
-            if not (np.isnan(v2_now) or np.isnan(v3_now) or
-                    np.isnan(v2_prev) or np.isnan(v3_prev)):
-                if v2_prev <= v3_prev and v2_now > v3_now:
-                    cup_vstop2 = v2_now; cup_vstop3 = v3_now
-                elif v2_prev >= v3_prev and v2_now < v3_now:
-                    cdn_vstop2 = v2_now; cdn_vstop3 = v3_now
+            v2_now = data['VStop2'].iloc[i]; v3_now = data['VStop3'].iloc[i]
+            v2_prv = data['VStop2'].iloc[i-1]; v3_prv = data['VStop3'].iloc[i-1]
+
+            cross_up   = (not np.isnan(v2_prv) and not np.isnan(v3_prv) and
+                          v2_prv <= v3_prv and v2_now > v3_now)
+            cross_down = (not np.isnan(v2_prv) and not np.isnan(v3_prv) and
+                          v2_prv >= v3_prv and v2_now < v3_now)
+
+            if cross_up:
+                cup_vstop2 = v2_now; cup_vstop3 = v3_now
+            if cross_down:
+                cdn_vstop2 = v2_now; cdn_vstop3 = v3_now
 
             cup_vstop2_arr[i] = cup_vstop2; cup_vstop3_arr[i] = cup_vstop3
             cdn_vstop2_arr[i] = cdn_vstop2; cdn_vstop3_arr[i] = cdn_vstop3
 
         data['cup_vstop2'] = cup_vstop2_arr; data['cup_vstop3'] = cup_vstop3_arr
         data['cdn_vstop2'] = cdn_vstop2_arr; data['cdn_vstop3'] = cdn_vstop3_arr
+
         data[['ATR','VStop2','VStop3',
               'cup_vstop2','cup_vstop3',
               'cdn_vstop2','cdn_vstop3']] = \
@@ -2396,35 +2871,18 @@ class IndicatorUpdate:
         return data
 
     async def calculate_additional_indicators(self, data):
+        """Compute pure price-derived indicators that do NOT depend on hma26_5m."""
         data['linearreg']     = talib.LINEARREG(data['close'], timeperiod=63)
-        data['lri_slope']     = talib.LINEARREG_SLOPE(data['close'], timeperiod=63)
         data['lri_intercept'] = talib.LINEARREG_INTERCEPT(data['close'], timeperiod=63)
         data['lri_curve']     = data['linearreg'] - data['lri_intercept']
-        data['lri_angle']     = talib.LINEARREG_ANGLE(data['close'], timeperiod=63)
-        data['ema26']         = talib.EMA(data['close'], timeperiod=26)
+        data['lri_angle']      = talib.LINEARREG_ANGLE(data['close'], timeperiod=63)
+        data['lri_angle_diff'] = (data['lri_angle'] - data['lri_angle'].shift(1))
+        data['ema26']          = talib.EMA(data['close'], timeperiod=26)
 
-        data['BuyCall'] = (data['lri_slope'] > 0).astype(int)
-        data['BuyPut']  = (data['lri_slope'] < 0).astype(int)
-
-        data['Bull'] = (
-            (data['close']     > data['linearreg']) &
-            (data['lri_slope'] > 0) &
-            (data['TrendUp3']  == 1) &
-            (data['close']     > data['open']) &
-            (data['BuyCall']   == 1)
-        ).astype(int)
-        data['Bear'] = (
-            (data['close']     < data['linearreg']) &
-            (data['lri_slope'] < 0) &
-            (data['TrendUp3']  == 0) &
-            (data['close']     < data['open']) &
-            (data['BuyPut']    == 1)
-        ).astype(int)
-
-        data[['linearreg','lri_slope','lri_intercept',
-              'lri_curve','lri_angle','ema26']] = \
-            data[['linearreg','lri_slope','lri_intercept',
-                  'lri_curve','lri_angle','ema26']].round(4)
+        data[['linearreg','lri_intercept',
+              'lri_curve','lri_angle','lri_angle_diff','ema26']] = \
+            data[['linearreg','lri_intercept',
+                  'lri_curve','lri_angle','lri_angle_diff','ema26']].round(4)
 
         # dayhigh / daylow — cumulative since 09:15 today only
         today_open = (pd.Timestamp.now(tz='Asia/Kolkata').normalize()
@@ -2435,6 +2893,42 @@ class IndicatorUpdate:
         data['daylow']  = np.where(today_mask,
                                    data['low'].where(today_mask).expanding().min(),  np.nan)
         data[['dayhigh','daylow']] = data[['dayhigh','daylow']].round(2)
+        return data
+
+    def calculate_signals(self, data):
+        """
+        Compute BuyCall / BuyPut / Bull / Bear.
+        Must be called AFTER merge_hma26_5m so that hma26_5m is available.
+
+        Long  (BuyCall): (linearreg > hma26_5m OR ema26 > hma26_5m)
+                          AND st_dir == 1
+                          AND lri_angle is rising (lri_angle > prev lri_angle)
+
+        Short (BuyPut):  (linearreg < hma26_5m OR ema26 < hma26_5m)
+                          AND st_dir == 0
+                          AND lri_angle is falling (lri_angle < prev lri_angle)
+        """
+        angle_rising  = data['lri_angle_diff'] > 0
+        angle_falling = data['lri_angle_diff'] < 0
+
+        price_above_hma = (data['linearreg'] > data['hma26_5m']) | (data['ema26'] > data['hma26_5m'])
+        price_below_hma = (data['linearreg'] < data['hma26_5m']) | (data['ema26'] < data['hma26_5m'])
+
+        data['BuyCall'] = (price_above_hma & (data['st_dir'] == 1) & angle_rising).astype(int)
+        data['BuyPut']  = (price_below_hma & (data['st_dir'] == 0) & angle_falling).astype(int)
+
+        data['Bull'] = (
+            (data['BuyCall'] == 1) &
+            (data['TrendUp3'] == 1) &
+            (data['close'] > data['open'])
+        ).astype(int)
+
+        data['Bear'] = (
+            (data['BuyPut'] == 1) &
+            (data['TrendUp3'] == 0) &
+            (data['close'] < data['open'])
+        ).astype(int)
+
         return data
 
     # ── DB save ───────────────────────────────────────────────────────────────
@@ -2448,7 +2942,8 @@ class IndicatorUpdate:
         replace_query = '''
             REPLACE INTO indicators_data (
                 datetime, open, high, low, close, ohlc4,
-                linearreg, lri_slope, lri_intercept, lri_curve, lri_angle, ema26,
+                linearreg, lri_intercept, lri_curve, lri_angle, lri_angle_diff, ema26,
+                wma_half, wma_full,
                 hma26_5m,
                 BuyCall, BuyPut, Bull, Bear,
                 ATR, VStop2, VStop3, TrendUp2, TrendUp3, Max, Min,
@@ -2458,7 +2953,7 @@ class IndicatorUpdate:
             ) VALUES (
                 %s,%s,%s,%s,%s,%s,
                 %s,%s,%s,%s,%s,%s,
-                %s,
+                %s,%s,%s,
                 %s,%s,%s,%s,
                 %s,%s,%s,%s,%s,%s,%s,
                 %s,%s,%s,%s,
@@ -2487,15 +2982,21 @@ class IndicatorUpdate:
         indicator_data = await self.calculate_supertrend(indicator_data)
         indicator_data = await self.calculate_additional_indicators(indicator_data)
 
-        # Merge 5-min HMA onto 1-min frame
+        # Merge 5-min HMA (and wma_half / wma_full) onto 1-min frame
         if len(ohlc_5m) >= 26:
             indicator_data = self.merge_hma26_5m(indicator_data, ohlc_5m)
         else:
             indicator_data['hma26_5m'] = np.nan
+            indicator_data['wma_half'] = np.nan
+            indicator_data['wma_full'] = np.nan
+
+        # Signals depend on hma26_5m — compute AFTER the merge
+        indicator_data = self.calculate_signals(indicator_data)
 
         cols = [
             'datetime', 'open', 'high', 'low', 'close', 'ohlc4',
-            'linearreg', 'lri_slope', 'lri_intercept', 'lri_curve', 'lri_angle', 'ema26',
+            'linearreg', 'lri_intercept', 'lri_curve', 'lri_angle', 'lri_angle_diff', 'ema26',
+            'wma_half', 'wma_full',
             'hma26_5m',
             'BuyCall', 'BuyPut', 'Bull', 'Bear',
             'ATR', 'VStop2', 'VStop3', 'TrendUp2', 'TrendUp3', 'Max', 'Min',
@@ -2630,9 +3131,11 @@ class IndicatorAllData:
                         open          DOUBLE, high  DOUBLE, low   DOUBLE, close DOUBLE,
                         ohlc4         DOUBLE,
                         linearreg     DOUBLE,
-                        lri_slope     DOUBLE, lri_intercept DOUBLE,
+                        lri_intercept DOUBLE,
                         lri_curve     DOUBLE, lri_angle     DOUBLE,
+                        lri_angle_diff DOUBLE,
                         ema26         DOUBLE,
+                        wma_half      DOUBLE,  wma_full     DOUBLE,
                         hma26_5m      DOUBLE,
                         BuyCall       INTEGER, BuyPut  INTEGER,
                         Bull          INTEGER, Bear    INTEGER,
@@ -2677,25 +3180,38 @@ class IndicatorAllData:
                 data    = pd.DataFrame(result, columns=columns)
                 data.sort_values(by='datetime', inplace=True)
                 return data
-    def _hma(self, series: pd.Series, length: int) -> pd.Series:
-        half  = max(1, length // 2)
-        sqrtn = max(1, int(np.floor(np.sqrt(length))))
-        wma_half = talib.WMA(series, timeperiod=half)
-        wma_full = talib.WMA(series, timeperiod=length)
-        diff     = 2 * wma_half - wma_full
-        return talib.WMA(diff, timeperiod=sqrtn)
+
     # ── HMA (5-min) → forward-fill onto 1-min index ──────────────────────────
+
+    def _hma(self, series: pd.Series, length: int):
+        """Returns (hma, wma_half, wma_full) as pd.Series — all on the same index."""
+        half      = max(1, length // 2)
+        sqrtn     = max(1, int(np.floor(np.sqrt(length))))
+        wma_half  = talib.WMA(series, timeperiod=half)
+        wma_full  = talib.WMA(series, timeperiod=length)
+        diff      = 2 * wma_half - wma_full
+        hma       = talib.WMA(diff, timeperiod=sqrtn)
+        return hma, wma_half, wma_full
 
     def merge_hma26_5m(self, data_1m, data_5m):
         df5 = data_5m.copy()
         df5['datetime'] = pd.to_datetime(df5['datetime'])
         df5.set_index('datetime', inplace=True)
-        df5['hma26_5m'] = self._hma(df5['hlc3'], 26).round(2)
+
+        hma, wma_half, wma_full = self._hma(df5['hlc3'], 26)
+        df5['hma26_5m'] = hma.round(2)
+        df5['wma_half'] = wma_half.round(2)   # wma(13) of hlc3 on 5m bars
+        df5['wma_full'] = wma_full.round(2)   # wma(26) of hlc3 on 5m bars
 
         df1 = data_1m.copy()
         df1['datetime'] = pd.to_datetime(df1['datetime'])
         df1.set_index('datetime', inplace=True)
+
+        # Forward-fill all three 5-min series onto the 1-min index
         df1['hma26_5m'] = df5['hma26_5m'].reindex(df1.index, method='ffill')
+        df1['wma_half'] = df5['wma_half'].reindex(df1.index, method='ffill')
+        df1['wma_full'] = df5['wma_full'].reindex(df1.index, method='ffill')
+
         df1.reset_index(inplace=True)
         return df1
 
@@ -2750,20 +3266,25 @@ class IndicatorAllData:
                                         if data['TrendUp3'].iloc[i]
                                         else data['Min'].iloc[i] + atr_m3)
 
-            v2_now  = data['VStop2'].iloc[i];  v3_now  = data['VStop3'].iloc[i]
-            v2_prev = data['VStop2'].iloc[i-1]; v3_prev = data['VStop3'].iloc[i-1]
-            if not (np.isnan(v2_now) or np.isnan(v3_now) or
-                    np.isnan(v2_prev) or np.isnan(v3_prev)):
-                if v2_prev <= v3_prev and v2_now > v3_now:
-                    cup_vstop2 = v2_now; cup_vstop3 = v3_now
-                elif v2_prev >= v3_prev and v2_now < v3_now:
-                    cdn_vstop2 = v2_now; cdn_vstop3 = v3_now
+            v2_now = data['VStop2'].iloc[i]; v3_now = data['VStop3'].iloc[i]
+            v2_prv = data['VStop2'].iloc[i-1]; v3_prv = data['VStop3'].iloc[i-1]
+
+            cross_up   = (not np.isnan(v2_prv) and not np.isnan(v3_prv) and
+                          v2_prv <= v3_prv and v2_now > v3_now)
+            cross_down = (not np.isnan(v2_prv) and not np.isnan(v3_prv) and
+                          v2_prv >= v3_prv and v2_now < v3_now)
+
+            if cross_up:
+                cup_vstop2 = v2_now; cup_vstop3 = v3_now
+            if cross_down:
+                cdn_vstop2 = v2_now; cdn_vstop3 = v3_now
 
             cup_vstop2_arr[i] = cup_vstop2; cup_vstop3_arr[i] = cup_vstop3
             cdn_vstop2_arr[i] = cdn_vstop2; cdn_vstop3_arr[i] = cdn_vstop3
 
         data['cup_vstop2'] = cup_vstop2_arr; data['cup_vstop3'] = cup_vstop3_arr
         data['cdn_vstop2'] = cdn_vstop2_arr; data['cdn_vstop3'] = cdn_vstop3_arr
+
         data[['ATR','VStop2','VStop3',
               'cup_vstop2','cup_vstop3',
               'cdn_vstop2','cdn_vstop3']] = \
@@ -2832,35 +3353,18 @@ class IndicatorAllData:
         return data
 
     async def calculate_additional_indicators(self, data):
+        """Compute pure price-derived indicators that do NOT depend on hma26_5m."""
         data['linearreg']     = talib.LINEARREG(data['close'], timeperiod=63)
-        data['lri_slope']     = talib.LINEARREG_SLOPE(data['close'], timeperiod=63)
         data['lri_intercept'] = talib.LINEARREG_INTERCEPT(data['close'], timeperiod=63)
         data['lri_curve']     = data['linearreg'] - data['lri_intercept']
-        data['lri_angle']     = talib.LINEARREG_ANGLE(data['close'], timeperiod=63)
-        data['ema26']         = talib.EMA(data['close'], timeperiod=26)
+        data['lri_angle']      = talib.LINEARREG_ANGLE(data['close'], timeperiod=63)
+        data['lri_angle_diff'] = (data['lri_angle'] - data['lri_angle'].shift(1))
+        data['ema26']          = talib.EMA(data['close'], timeperiod=26)
 
-        data['BuyCall'] = (data['lri_slope'] > 0).astype(int)
-        data['BuyPut']  = (data['lri_slope'] < 0).astype(int)
-
-        data['Bull'] = (
-            (data['close']     > data['linearreg']) &
-            (data['lri_slope'] > 0) &
-            (data['TrendUp3']  == 1) &
-            (data['close']     > data['open']) &
-            (data['BuyCall']   == 1)
-        ).astype(int)
-        data['Bear'] = (
-            (data['close']     < data['linearreg']) &
-            (data['lri_slope'] < 0) &
-            (data['TrendUp3']  == 0) &
-            (data['close']     < data['open']) &
-            (data['BuyPut']    == 1)
-        ).astype(int)
-
-        data[['linearreg','lri_slope','lri_intercept',
-              'lri_curve','lri_angle','ema26']] = \
-            data[['linearreg','lri_slope','lri_intercept',
-                  'lri_curve','lri_angle','ema26']].round(4)
+        data[['linearreg','lri_intercept',
+              'lri_curve','lri_angle','lri_angle_diff','ema26']] = \
+            data[['linearreg','lri_intercept',
+                  'lri_curve','lri_angle','lri_angle_diff','ema26']].round(4)
 
         # dayhigh / daylow — correct multi-day cumulative per calendar day
         data['_dt']       = pd.to_datetime(data['datetime'])
@@ -2870,6 +3374,42 @@ class IndicatorAllData:
         data['daylow']  = data['low'].where(mask).groupby(data['_dt'].dt.date).cummin()
         data[['dayhigh','daylow']] = data[['dayhigh','daylow']].round(2)
         data.drop(columns=['_dt','_day_open'], inplace=True)
+        return data
+
+    def calculate_signals(self, data):
+        """
+        Compute BuyCall / BuyPut / Bull / Bear.
+        Must be called AFTER merge_hma26_5m so that hma26_5m is available.
+
+        Long  (BuyCall): (linearreg > hma26_5m OR ema26 > hma26_5m)
+                          AND st_dir == 1
+                          AND lri_angle is rising (lri_angle > prev lri_angle)
+
+        Short (BuyPut):  (linearreg < hma26_5m OR ema26 < hma26_5m)
+                          AND st_dir == 0
+                          AND lri_angle is falling (lri_angle < prev lri_angle)
+        """
+        angle_rising  = data['lri_angle_diff'] > 0
+        angle_falling = data['lri_angle_diff'] < 0
+
+        price_above_hma = (data['linearreg'] > data['hma26_5m']) | (data['ema26'] > data['hma26_5m'])
+        price_below_hma = (data['linearreg'] < data['hma26_5m']) | (data['ema26'] < data['hma26_5m'])
+
+        data['BuyCall'] = (price_above_hma & (data['st_dir'] == 1) & angle_rising).astype(int)
+        data['BuyPut']  = (price_below_hma & (data['st_dir'] == 0) & angle_falling).astype(int)
+
+        data['Bull'] = (
+            (data['BuyCall'] == 1) &
+            (data['TrendUp3'] == 1) &
+            (data['close'] > data['open'])
+        ).astype(int)
+
+        data['Bear'] = (
+            (data['BuyPut'] == 1) &
+            (data['TrendUp3'] == 0) &
+            (data['close'] < data['open'])
+        ).astype(int)
+
         return data
 
     # ── DB save ───────────────────────────────────────────────────────────────
@@ -2882,7 +3422,8 @@ class IndicatorAllData:
         replace_query = '''
             REPLACE INTO indicators_data (
                 datetime, open, high, low, close, ohlc4,
-                linearreg, lri_slope, lri_intercept, lri_curve, lri_angle, ema26,
+                linearreg, lri_intercept, lri_curve, lri_angle, lri_angle_diff, ema26,
+                wma_half, wma_full,
                 hma26_5m,
                 BuyCall, BuyPut, Bull, Bear,
                 ATR, VStop2, VStop3, TrendUp2, TrendUp3, Max, Min,
@@ -2892,7 +3433,7 @@ class IndicatorAllData:
             ) VALUES (
                 %s,%s,%s,%s,%s,%s,
                 %s,%s,%s,%s,%s,%s,
-                %s,
+                %s,%s,%s,
                 %s,%s,%s,%s,
                 %s,%s,%s,%s,%s,%s,%s,
                 %s,%s,%s,%s,
@@ -2925,11 +3466,17 @@ class IndicatorAllData:
             indicator_data = await self.calculate_vstop(ohlc_1m)
             indicator_data = await self.calculate_supertrend(indicator_data)
             indicator_data = await self.calculate_additional_indicators(indicator_data)
+
+            # Merge 5-min HMA (and wma_half / wma_full) onto 1-min frame
             indicator_data = self.merge_hma26_5m(indicator_data, ohlc_5m)
+
+            # Signals depend on hma26_5m — compute AFTER the merge
+            indicator_data = self.calculate_signals(indicator_data)
 
             cols = [
                 'datetime', 'open', 'high', 'low', 'close', 'ohlc4',
-                'linearreg', 'lri_slope', 'lri_intercept', 'lri_curve', 'lri_angle', 'ema26',
+                'linearreg', 'lri_intercept', 'lri_curve', 'lri_angle', 'lri_angle_diff', 'ema26',
+                'wma_half', 'wma_full',
                 'hma26_5m',
                 'BuyCall', 'BuyPut', 'Bull', 'Bear',
                 'ATR', 'VStop2', 'VStop3', 'TrendUp2', 'TrendUp3', 'Max', 'Min',
@@ -2950,8 +3497,8 @@ class IndicatorAllData:
 
 
 if __name__ == "__main__":
-    indicator_alldata = IndicatorAllData()
-    asyncio.run(indicator_alldata.run())
+    indicator_all = IndicatorAllData()
+    asyncio.run(indicator_all.run())
 ```
 
 ### 📄 scripts/optionbuying.py
@@ -3119,25 +3666,46 @@ class OptionBuying:
 
     # ── Signal calculation ───────────────────────────────────────────────────
     async def get_sma_cross_data(self, data):
+        """
+        Identify long-entry (crossover) and short-entry (crossunder) candles.
+
+        BuyCall and BuyPut already encode the full signal logic computed by
+        indicator_update.py:
+          BuyCall = (linearreg > hma26_5m OR ema26 > hma26_5m)
+                    AND st_dir == 1
+                    AND lri_angle is rising
+          BuyPut  = (linearreg < hma26_5m OR ema26 < hma26_5m)
+                    AND st_dir == 0
+                    AND lri_angle is falling
+
+        They are used here directly as the qualifying gate on VStop crossovers —
+        no separate lri_slope check is needed.
+        """
         required = [
-            'lri_slope', 'lri_angle', 'TrendUp2', 'TrendUp3',
+            'lri_angle', 'TrendUp2', 'TrendUp3',
             'BuyCall', 'BuyPut', 'close', 'open',
         ]
         missing = [c for c in required if c not in data.columns]
         if missing:
             raise ValueError(f"Missing columns in indicators_data: {missing}")
 
+        # ── Long-entry crossover ─────────────────────────────────────────────
+        # VStop2 crosses above its previous level AND BuyCall confirms long bias,
+        # OR VStop3 just turned up, OR both VStops simultaneously turned up.
         trendup_crossover = (
             ((data['TrendUp2'] == 1) & (data['TrendUp2'].shift(1) == 0) &
-             ((data['lri_slope'] > 0) | (data['BuyCall'] == 1))) |
+             (data['BuyCall'] == 1)) |
             ((data['TrendUp3'] == 1) & (data['TrendUp3'].shift(1) == 0)) |
             ((data['TrendUp2'] == 1) & (data['TrendUp3'] == 1) &
              (data['TrendUp3'].shift(1) == 0) & (data['TrendUp2'].shift(1) == 0))
         )
 
+        # ── Short-entry crossunder ───────────────────────────────────────────
+        # VStop2 crosses below its previous level AND BuyPut confirms short bias,
+        # OR VStop3 just turned down, OR both VStops simultaneously turned down.
         trendup_crossunder = (
             ((data['TrendUp2'] == 0) & (data['TrendUp2'].shift(1) == 1) &
-             ((data['lri_slope'] < 0) | (data['BuyPut'] == 1))) |
+             (data['BuyPut'] == 1)) |
             ((data['TrendUp3'] == 0) & (data['TrendUp3'].shift(1) == 1)) |
             ((data['TrendUp2'] == 0) & (data['TrendUp3'] == 0) &
              (data['TrendUp3'].shift(1) == 1) & (data['TrendUp2'].shift(1) == 1))
@@ -3768,206 +4336,7 @@ if __name__ == "__main__":
 
 ```py
 from tvDatafeed import TvDatafeed, Interval
-import pandas as pd
-import asyncio
-import aiomysql
-import os
-import ssl
-
-holidays = [
-    # 2025
-    "2025-02-26", "2025-03-14", "2025-03-31", "2025-04-10",
-    "2025-04-14", "2025-04-18", "2025-05-01", "2025-08-15",
-    "2025-08-27", "2025-10-02", "2025-10-21", "2025-10-22",
-    "2025-11-05", "2025-11-15", "2025-12-25",
-    # 2026
-    "2026-01-26", "2026-03-03", "2026-03-26", "2026-03-31",
-    "2026-04-03", "2026-04-14", "2026-05-01", "2026-05-28",
-    "2026-06-26", "2026-09-14", "2026-10-02", "2026-10-20",
-    "2026-11-10", "2026-11-24", "2026-12-25",
-]
-
-db_config = {
-    "host":     os.getenv("DB_HOST"),
-    "port":     int(os.getenv("DB_PORT", 3306)),
-    "user":     os.getenv("DB_USER"),
-    "password": os.getenv("DB_PASSWORD"),
-    "database": os.getenv("DB_NAME"),
-}
-
-
-class TvDataAll:
-
-    def __init__(self):
-        self.tv = TvDatafeed()
-
-    # ── DB pool ───────────────────────────────────────────────────────────────
-
-    async def get_mysql_pool(self):
-        ssl_ctx = None
-        ca_path = os.path.join(os.path.dirname(__file__), '..', 'ca.pem')
-        if os.path.exists(ca_path):
-            ssl_ctx = ssl.create_default_context(cafile=ca_path)
-
-        pool = await aiomysql.create_pool(
-            host=db_config['host'],
-            port=db_config['port'],
-            user=db_config['user'],
-            password=db_config['password'],
-            db=db_config['database'],
-            autocommit=True,
-            ssl=ssl_ctx,
-            minsize=2,
-            maxsize=10,
-        )
-        return pool
-
-    # ── DDL ───────────────────────────────────────────────────────────────────
-
-    async def create_tables_if_not_exists(self, pool):
-        async with pool.acquire() as conn:
-            async with conn.cursor() as cursor:
-                await cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS ohlctick_1mdata (
-                        datetime DATETIME PRIMARY KEY,
-                        open     FLOAT,
-                        high     FLOAT,
-                        low      FLOAT,
-                        close    FLOAT,
-                        ohlc4    FLOAT
-                    )
-                ''')
-                await cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS ohlctick_5mdata (
-                        datetime DATETIME PRIMARY KEY,
-                        open     FLOAT,
-                        high     FLOAT,
-                        low      FLOAT,
-                        close    FLOAT,
-                        ohlc4    FLOAT,
-                        hlc3     FLOAT
-                    )
-                ''')
-            await conn.commit()
-
-    async def truncate_tables(self, pool):
-        async with pool.acquire() as conn:
-            async with conn.cursor() as cursor:
-                await cursor.execute('TRUNCATE TABLE ohlctick_1mdata')
-                await cursor.execute('TRUNCATE TABLE ohlctick_5mdata')
-            await conn.commit()
-        print("Tables truncated.")
-
-    # ── Fetch & clean ─────────────────────────────────────────────────────────
-
-    def _clean_tv_df(self, raw_data):
-        """Convert raw TvDatafeed output to clean IST-aware, tz-naive DataFrame."""
-        df = pd.DataFrame(raw_data)
-        df.index = pd.to_datetime(df.index, errors='coerce')
-        df.reset_index(inplace=True)
-        df.rename(columns={'index': 'datetime'}, inplace=True)
-        df['datetime'] = (
-            pd.to_datetime(df['datetime'], utc=True)
-              .dt.tz_convert('Asia/Kolkata')
-              .dt.tz_localize(None)
-        )
-        df.rename(columns={
-            'Open': 'open', 'High': 'high',
-            'Low':  'low',  'Close': 'close',
-        }, inplace=True)
-        if not {'open', 'high', 'low', 'close'}.issubset(df.columns):
-            print("Missing expected OHLC columns. Available:", df.columns.tolist())
-            return pd.DataFrame()
-        df['ohlc4'] = ((df['open'] + df['high'] +
-                        df['low']  + df['close']) / 4).round(2)
-        return df
-
-    def fetch_1m(self, n_bars=1000):
-        print(f"Fetching {n_bars} bars of 1-min data...")
-        raw = self.tv.get_hist(
-            symbol='BANKNIFTY', exchange='NSE',
-            interval=Interval.in_1_minute,
-            n_bars=n_bars,
-        )
-        if raw is None or raw.empty:
-            print("1-min fetch returned no data.")
-            return pd.DataFrame()
-        df = self._clean_tv_df(raw)
-        if df.empty:
-            return df
-        return df[['datetime', 'open', 'high', 'low', 'close', 'ohlc4']]
-
-    def fetch_5m(self, n_bars=200):
-        print(f"Fetching {n_bars} bars of 5-min data...")
-        raw = self.tv.get_hist(
-            symbol='BANKNIFTY', exchange='NSE',
-            interval=Interval.in_5_minute,
-            n_bars=n_bars,
-        )
-        if raw is None or raw.empty:
-            print("5-min fetch returned no data.")
-            return pd.DataFrame()
-        df = self._clean_tv_df(raw)
-        if df.empty:
-            return df
-        df['hlc3'] = ((df['high'] + df['low'] + df['close']) / 3).round(2)
-        return df[['datetime', 'open', 'high', 'low', 'close', 'ohlc4', 'hlc3']]
-
-    # ── DB insert ─────────────────────────────────────────────────────────────
-
-    async def insert_dataframe(self, pool, df, table):
-        if df.empty:
-            print(f"[{table}] Nothing to insert.")
-            return
-        # Drop rows where all OHLC are zero — bad bars
-        df = df[(df[['open', 'high', 'low', 'close']] != 0).all(axis=1)]
-        if df.empty:
-            print(f"[{table}] All rows were zero-OHLC, skipping.")
-            return
-
-        cols         = df.columns.tolist()
-        col_names    = ', '.join(f'`{c}`' for c in cols)
-        placeholders = ', '.join(['%s'] * len(cols))
-        sql          = f'REPLACE INTO `{table}` ({col_names}) VALUES ({placeholders})'
-
-        records = [tuple(row) for row in df.itertuples(index=False)]
-        async with pool.acquire() as conn:
-            async with conn.cursor() as cursor:
-                try:
-                    await cursor.executemany(sql, records)
-                    await conn.commit()
-                    print(f"[{table}] Inserted/replaced {len(records)} rows.")
-                except Exception as e:
-                    print(f"[{table}] Insert error: {e}")
-                    await conn.rollback()
-
-    # ── Entry point ───────────────────────────────────────────────────────────
-
-    async def run(self):
-        pool = await self.get_mysql_pool()
-        await self.create_tables_if_not_exists(pool)
-        await self.truncate_tables(pool)
-
-        df_1m = self.fetch_1m(n_bars=1000)
-        df_5m = self.fetch_5m(n_bars=200)
-
-        await self.insert_dataframe(pool, df_1m, 'ohlctick_1mdata')
-        await self.insert_dataframe(pool, df_5m, 'ohlctick_5mdata')
-
-        pool.close()
-        await pool.wait_closed()
-        print("Done.")
-
-
-if __name__ == "__main__":
-    tvdata = TvDataAll()
-    asyncio.run(tvdata.run())
-```
-
-### 📄 scripts/tvdata_update.py
-
-```py
-from tvDatafeed import TvDatafeed, Interval
+from breeze_connect import BreezeConnect
 import pandas as pd
 import asyncio
 import aiomysql
@@ -3999,11 +4368,374 @@ db_config = {
     "database": os.getenv("DB_NAME"),
 }
 
+MARKET_OPEN_H,  MARKET_OPEN_M  = 9,  15
+MARKET_CLOSE_H, MARKET_CLOSE_M = 15, 30
+
+BREEZE_INTERVAL = {
+    '1m': '1minute',
+    '5m': '5minute',
+}
+
+
+class TvDataAll:
+
+    def __init__(self):
+        self.tv      = None   # created lazily — avoid crashing at import time
+        self._breeze = None   # created lazily on first fallback
+
+    # ── Breeze session (lazy) ─────────────────────────────────────────────────
+
+    def _get_breeze(self) -> BreezeConnect:
+        if self._breeze is None:
+            api_key       = os.getenv("API_KEY")
+            api_secret    = os.getenv("API_SECRET")
+            session_token = os.getenv("SESSION_TOKEN")
+            if not all([api_key, api_secret, session_token]):
+                raise EnvironmentError(
+                    "Breeze fallback requires API_KEY, API_SECRET, SESSION_TOKEN."
+                )
+            self._breeze = BreezeConnect(api_key=api_key)
+            self._breeze.generate_session(
+                api_secret=api_secret, session_token=str(session_token))
+            print("[Breeze] Session initialised.")
+        return self._breeze
+
+    # ── DB pool ───────────────────────────────────────────────────────────────
+
+    async def get_mysql_pool(self):
+        ssl_ctx = None
+        ca_path = os.path.join(os.path.dirname(__file__), '..', 'ca.pem')
+        if os.path.exists(ca_path):
+            ssl_ctx = ssl.create_default_context(cafile=ca_path)
+        pool = await aiomysql.create_pool(
+            host=db_config['host'], port=db_config['port'],
+            user=db_config['user'], password=db_config['password'],
+            db=db_config['database'],
+            autocommit=True, ssl=ssl_ctx, minsize=2, maxsize=10,
+        )
+        return pool
+
+    # ── DDL ───────────────────────────────────────────────────────────────────
+
+    async def create_tables_if_not_exists(self, pool):
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                await cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS ohlctick_1mdata (
+                        datetime DATETIME PRIMARY KEY,
+                        open FLOAT, high FLOAT, low FLOAT, close FLOAT, ohlc4 FLOAT
+                    )
+                ''')
+                await cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS ohlctick_5mdata (
+                        datetime DATETIME PRIMARY KEY,
+                        open FLOAT, high FLOAT, low FLOAT, close FLOAT,
+                        ohlc4 FLOAT, hlc3 FLOAT
+                    )
+                ''')
+            await conn.commit()
+
+    async def truncate_tables(self, pool):
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                await cursor.execute('TRUNCATE TABLE ohlctick_1mdata')
+                await cursor.execute('TRUNCATE TABLE ohlctick_5mdata')
+            await conn.commit()
+        print("ohlctick tables truncated.")
+
+    # ── TvDatafeed clean ──────────────────────────────────────────────────────
+
+    def _clean_tv_df(self, raw_data):
+        df = pd.DataFrame(raw_data)
+        df.index = pd.to_datetime(df.index, errors='coerce')
+        df.reset_index(inplace=True)
+        df.rename(columns={'index': 'datetime'}, inplace=True)
+        df['datetime'] = (
+            pd.to_datetime(df['datetime'], utc=True)
+              .dt.tz_convert('Asia/Kolkata')
+              .dt.tz_localize(None)
+        )
+        df.rename(columns={
+            'Open': 'open', 'High': 'high',
+            'Low':  'low',  'Close': 'close',
+        }, inplace=True)
+        if not {'open', 'high', 'low', 'close'}.issubset(df.columns):
+            print("Missing OHLC columns. Available:", df.columns.tolist())
+            return pd.DataFrame()
+        df['ohlc4'] = ((df['open'] + df['high'] +
+                        df['low']  + df['close']) / 4).round(2)
+        return df
+
+    # ── Breeze helpers (shared with tvdata_update.py pattern) ─────────────────
+
+    def _is_business_day(self, date) -> bool:
+        return date.weekday() < 5 and date.strftime('%Y-%m-%d') not in holidays
+
+    def _breeze_fetch_session(self, breeze, interval, from_str, to_str, label):
+        """Fetch one session window. Returns [datetime,open,high,low,close] or empty."""
+        try:
+            resp = breeze.get_historical_data(
+                interval=interval, from_date=from_str, to_date=to_str,
+                stock_code="CNXBAN", exchange_code="NSE", product_type="cash",
+            )
+            if not resp or resp.get('Status') != 200:
+                print(f"[Breeze/{label}] Bad response {from_str}: "
+                      f"Status={resp.get('Status') if resp else 'None'}")
+                return pd.DataFrame()
+            records = resp.get('Success') or []
+            if not records:
+                print(f"[Breeze/{label}] Empty payload for {from_str}.")
+                return pd.DataFrame()
+
+            df = pd.DataFrame(records)
+            df['datetime'] = pd.to_datetime(df['datetime'])
+            if df['datetime'].dt.tz is not None:
+                df['datetime'] = df['datetime'].dt.tz_localize(None)
+            for col in ['open', 'high', 'low', 'close']:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+            df.dropna(subset=['open', 'high', 'low', 'close'], inplace=True)
+            df = df[df['open'] != 0].copy()
+
+            # Market hours only
+            t = df['datetime'].dt.time
+            df = df[(t >= datetime.strptime('09:15', '%H:%M').time()) &
+                    (t <= datetime.strptime('15:30', '%H:%M').time())].copy()
+
+            print(f"  [Breeze/{label}] {len(df)} bars from {from_str}")
+            return df[['datetime', 'open', 'high', 'low', 'close']]
+        except Exception as e:
+            print(f"[Breeze/{label}] Session error {from_str}: {e}")
+            return pd.DataFrame()
+
+    def _fetch_breeze(self, n_bars, timeframe='1m') -> pd.DataFrame:
+        """
+        Multi-day Breeze fallback. Fetches today first then walks back day by
+        day (up to 10 calendar days) until n_bars is satisfied.
+        Returns [datetime, open, high, low, close, ohlc4], tz-naive IST.
+        """
+        breeze   = self._get_breeze()
+        interval = BREEZE_INTERVAL[timeframe]
+        fmt      = '%Y-%m-%d %H:%M:%S'
+        now_ist  = datetime.now(IST)
+        today    = now_ist.date()
+        session_end = now_ist.replace(hour=MARKET_CLOSE_H, minute=MARKET_CLOSE_M,
+                                      second=0, microsecond=0)
+        combined = pd.DataFrame()
+
+        # Today's session
+        today_start = datetime.combine(today, datetime.strptime('09:15', '%H:%M').time())
+        print(f"[Breeze/{timeframe}] Fetching today: {today_start.strftime(fmt)}")
+        day_df = self._breeze_fetch_session(
+            breeze, interval,
+            today_start.strftime(fmt), session_end.strftime(fmt), timeframe)
+        if not day_df.empty:
+            combined = day_df
+
+        # Walk back until n_bars satisfied
+        lookback_day = today - timedelta(days=1)
+        cutoff       = today - timedelta(days=10)
+        while len(combined) < n_bars and lookback_day >= cutoff:
+            if not self._is_business_day(lookback_day):
+                lookback_day -= timedelta(days=1)
+                continue
+            d_start = datetime.combine(lookback_day,
+                        datetime.strptime('09:15', '%H:%M').time())
+            d_end   = datetime.combine(lookback_day,
+                        datetime.strptime('15:30', '%H:%M').time())
+            print(f"[Breeze/{timeframe}] Prior session ({lookback_day}): "
+                  f"have {len(combined)}/{n_bars}")
+            day_df = self._breeze_fetch_session(
+                breeze, interval,
+                d_start.strftime(fmt), d_end.strftime(fmt), timeframe)
+            if not day_df.empty:
+                combined = pd.concat([day_df, combined], ignore_index=True)
+            lookback_day -= timedelta(days=1)
+
+        if combined.empty:
+            print(f"[Breeze/{timeframe}] No data collected.")
+            return pd.DataFrame()
+
+        combined.sort_values('datetime', inplace=True)
+        combined.drop_duplicates(subset='datetime', keep='last', inplace=True)
+        combined.reset_index(drop=True, inplace=True)
+        combined['ohlc4'] = ((combined['open'] + combined['high'] +
+                              combined['low']  + combined['close']) / 4).round(2)
+        combined = combined.tail(n_bars).reset_index(drop=True)
+        print(f"[Breeze/{timeframe}] Returning {len(combined)} bars.")
+        return combined[['datetime', 'open', 'high', 'low', 'close', 'ohlc4']]
+
+    # ── Primary fetch with fallback ───────────────────────────────────────────
+
+    def fetch_1m(self, n_bars=1000) -> pd.DataFrame:
+        """Fetch n_bars of 1-min data. TV primary → Breeze fallback."""
+        print(f"[TV/1m] Fetching {n_bars} bars...")
+        try:
+            if self.tv is None:
+                self.tv = TvDatafeed()
+            raw = self.tv.get_hist(
+                symbol='BANKNIFTY', exchange='NSE',
+                interval=Interval.in_1_minute, n_bars=n_bars,
+            )
+            if raw is not None and not raw.empty:
+                df = self._clean_tv_df(raw)
+                if not df.empty:
+                    print(f"[TV/1m] Got {len(df)} bars from TvDatafeed.")
+                    return df[['datetime', 'open', 'high', 'low', 'close', 'ohlc4']]
+        except Exception as e:
+            print(f"[TV/1m] TvDatafeed error: {e}")
+
+        print("[TV/1m] Falling back to Breeze...")
+        return self._fetch_breeze(n_bars, '1m')
+
+    def fetch_5m(self, n_bars=200) -> pd.DataFrame:
+        """Fetch n_bars of 5-min data. TV primary → Breeze fallback."""
+        print(f"[TV/5m] Fetching {n_bars} bars...")
+        try:
+            if self.tv is None:
+                self.tv = TvDatafeed()
+            raw = self.tv.get_hist(
+                symbol='BANKNIFTY', exchange='NSE',
+                interval=Interval.in_5_minute, n_bars=n_bars,
+            )
+            if raw is not None and not raw.empty:
+                df = self._clean_tv_df(raw)
+                if not df.empty:
+                    df['hlc3'] = ((df['high'] + df['low'] + df['close']) / 3).round(2)
+                    print(f"[TV/5m] Got {len(df)} bars from TvDatafeed.")
+                    return df[['datetime', 'open', 'high', 'low', 'close', 'ohlc4', 'hlc3']]
+        except Exception as e:
+            print(f"[TV/5m] TvDatafeed error: {e}")
+
+        print("[TV/5m] Falling back to Breeze...")
+        df = self._fetch_breeze(n_bars, '5m')
+        if not df.empty:
+            df['hlc3'] = ((df['high'] + df['low'] + df['close']) / 3).round(2)
+            return df[['datetime', 'open', 'high', 'low', 'close', 'ohlc4', 'hlc3']]
+        return df
+
+    # ── DB insert ─────────────────────────────────────────────────────────────
+
+    async def insert_dataframe(self, pool, df, table):
+        if df.empty:
+            print(f"[{table}] Nothing to insert.")
+            return
+        df = df[(df[['open', 'high', 'low', 'close']] != 0).all(axis=1)]
+        if df.empty:
+            print(f"[{table}] All rows were zero-OHLC, skipping.")
+            return
+        cols         = df.columns.tolist()
+        col_names    = ', '.join(f'`{c}`' for c in cols)
+        placeholders = ', '.join(['%s'] * len(cols))
+        sql          = f'REPLACE INTO `{table}` ({col_names}) VALUES ({placeholders})'
+        records      = [tuple(row) for row in df.itertuples(index=False)]
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                try:
+                    await cursor.executemany(sql, records)
+                    await conn.commit()
+                    print(f"[{table}] Inserted/replaced {len(records)} rows.")
+                except Exception as e:
+                    print(f"[{table}] Insert error: {e}")
+                    await conn.rollback()
+
+    # ── Entry point ───────────────────────────────────────────────────────────
+
+    async def run(self):
+        pool = await self.get_mysql_pool()
+        await self.create_tables_if_not_exists(pool)
+        await self.truncate_tables(pool)
+
+        df_1m = self.fetch_1m(n_bars=1000)
+        df_5m = self.fetch_5m(n_bars=200)
+
+        await self.insert_dataframe(pool, df_1m, 'ohlctick_1mdata')
+        await self.insert_dataframe(pool, df_5m, 'ohlctick_5mdata')
+
+        pool.close()
+        await pool.wait_closed()
+        print("tvdata.py complete.")
+
+
+if __name__ == "__main__":
+    tvdata = TvDataAll()
+    asyncio.run(tvdata.run())
+```
+
+### 📄 scripts/tvdata_update.py
+
+```py
+from tvDatafeed import TvDatafeed, Interval
+from breeze_connect import BreezeConnect
+import pandas as pd
+import numpy as np
+import asyncio
+import aiomysql
+import os
+import ssl
+import pytz
+from datetime import datetime, timedelta
+
+IST = pytz.timezone('Asia/Kolkata')
+
+holidays = [
+    # 2025
+    "2025-02-26", "2025-03-14", "2025-03-31", "2025-04-10",
+    "2025-04-14", "2025-04-18", "2025-05-01", "2025-08-15",
+    "2025-08-27", "2025-10-02", "2025-10-21", "2025-10-22",
+    "2025-11-05", "2025-11-15", "2025-12-25",
+    # 2026
+    "2026-01-26", "2026-03-03", "2026-03-26", "2026-03-31",
+    "2026-04-03", "2026-04-14", "2026-05-01", "2026-05-28",
+    "2026-06-26", "2026-09-14", "2026-10-02", "2026-10-20",
+    "2026-11-10", "2026-11-24", "2026-12-25",
+]
+
+db_config = {
+    "host":     os.getenv("DB_HOST"),
+    "port":     int(os.getenv("DB_PORT", 3306)),
+    "user":     os.getenv("DB_USER"),
+    "password": os.getenv("DB_PASSWORD"),
+    "database": os.getenv("DB_NAME"),
+}
+
+# ── Breeze interval strings ───────────────────────────────────────────────────
+# get_historical_data (v1) accepts: "1minute","5minute","30minute","1day"
+BREEZE_INTERVAL = {
+    '1m': '1minute',
+    '5m': '5minute',
+}
+
+# ── Trading session constants ─────────────────────────────────────────────────
+MARKET_OPEN_H,  MARKET_OPEN_M  = 9,  15
+MARKET_CLOSE_H, MARKET_CLOSE_M = 15, 30
+SESSION_MINUTES = 375   # 09:15 – 15:30
+
 
 class TvDataUpdate:
 
     def __init__(self):
-        self.tv = None  # TvDatafeed instance — created once in run()
+        self.tv  = None   # TvDatafeed — created once in run()
+        self._breeze = None  # BreezeConnect — created lazily on first fallback
+
+    # ── Breeze API (lazy init) ────────────────────────────────────────────────
+
+    def _get_breeze(self):
+        """Initialise Breeze API once and reuse for the session."""
+        if self._breeze is None:
+            api_key       = os.getenv("API_KEY")
+            api_secret    = os.getenv("API_SECRET")
+            session_token = os.getenv("SESSION_TOKEN")
+            if not all([api_key, api_secret, session_token]):
+                raise EnvironmentError(
+                    "Breeze fallback requires API_KEY, API_SECRET, SESSION_TOKEN env vars."
+                )
+            self._breeze = BreezeConnect(api_key=api_key)
+            self._breeze.generate_session(
+                api_secret=api_secret,
+                session_token=str(session_token),
+            )
+            print("[Breeze] Session initialised.")
+        return self._breeze
 
     # ── DB pool ───────────────────────────────────────────────────────────────
 
@@ -4060,12 +4792,12 @@ class TvDataUpdate:
         table    = 'ohlctick_1mdata' if timeframe == '1m' else 'ohlctick_5mdata'
         interval = 'INTERVAL 1 MINUTE' if timeframe == '1m' else 'INTERVAL 5 MINUTE'
 
-        now              = pd.Timestamp.now(tz='Asia/Kolkata')
-        open_time_dt     = now.replace(hour=9,  minute=15, second=0, microsecond=0)
-        close_time_dt    = now.replace(hour=15, minute=30, second=0, microsecond=0)
-        period_now       = pd.Period.now('1min')
-        previous_candle  = (period_now - 1).start_time.tz_localize('Asia/Kolkata')
-        min_datetime     = min(close_time_dt, previous_candle)
+        now             = pd.Timestamp.now(tz='Asia/Kolkata')
+        open_time_dt    = now.replace(hour=MARKET_OPEN_H,  minute=MARKET_OPEN_M,  second=0, microsecond=0)
+        close_time_dt   = now.replace(hour=MARKET_CLOSE_H, minute=MARKET_CLOSE_M, second=0, microsecond=0)
+        period_now      = pd.Period.now('1min')
+        previous_candle = (period_now - 1).start_time.tz_localize('Asia/Kolkata')
+        min_datetime    = min(close_time_dt, previous_candle)
 
         open_str = open_time_dt.strftime('%Y-%m-%d %H:%M:%S')
         min_str  = min_datetime.strftime('%Y-%m-%d %H:%M:%S')
@@ -4104,7 +4836,7 @@ class TvDataUpdate:
                     print(f"[{timeframe}] Missing/duplicate candles in {table}: {num_issues}")
                 return num_issues
 
-    # ── TvDatafeed fetch & clean ──────────────────────────────────────────────
+    # ── Shared DataFrame cleaner ──────────────────────────────────────────────
 
     def _clean_tv_df(self, raw_data):
         """Convert raw TvDatafeed output to a clean, IST-aware, tz-naive DataFrame."""
@@ -4125,29 +4857,205 @@ class TvDataUpdate:
                         df['low']  + df['close']) / 4).round(2)
         return df[['datetime', 'open', 'high', 'low', 'close', 'ohlc4']]
 
-    async def fetch_tv_data_1m(self, pool):
-        num_issues = await self.check_missing_or_duplicate_keys(pool, '1m')
-        raw = self.tv.get_hist(
-            symbol='BANKNIFTY', exchange='NSE',
-            interval=Interval.in_1_minute,
-            n_bars=num_issues + 750,
-        )
-        if raw is None or raw.empty:
-            print("[1m] TvDatafeed returned no data.")
+    # ── Breeze single-session fetch ───────────────────────────────────────────
+
+    def _breeze_fetch_session(self, breeze, interval, from_str, to_str, timeframe):
+        """
+        Fetch one session window from Breeze and return a clean DataFrame.
+        Returns empty DataFrame on any failure — never raises.
+        Columns: [datetime, open, high, low, close]  (ohlc4 added by caller)
+        """
+        try:
+            resp = breeze.get_historical_data(
+                interval      = interval,
+                from_date     = from_str,
+                to_date       = to_str,
+                stock_code    = "CNXBAN",
+                exchange_code = "NSE",
+                product_type  = "cash",
+            )
+            if not resp or resp.get('Status') != 200:
+                print(f"[Breeze/{timeframe}] Bad response {from_str}: "
+                      f"Status={resp.get('Status') if resp else 'None'}, "
+                      f"Error={resp.get('Error', 'unknown') if resp else ''}")
+                return pd.DataFrame()
+
+            records = resp.get('Success') or []
+            if not records:
+                print(f"[Breeze/{timeframe}] Empty payload for {from_str}.")
+                return pd.DataFrame()
+
+            df = pd.DataFrame(records)
+            df['datetime'] = pd.to_datetime(df['datetime'])
+            if df['datetime'].dt.tz is not None:
+                df['datetime'] = df['datetime'].dt.tz_localize(None)
+
+            for col in ['open', 'high', 'low', 'close']:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+
+            df.dropna(subset=['open', 'high', 'low', 'close'], inplace=True)
+            df = df[df['open'] != 0].copy()
+
+            # Keep only market-hours candles (09:15 – 15:30)
+            t = df['datetime'].dt.time
+            market_open  = datetime.strptime('09:15', '%H:%M').time()
+            market_close = datetime.strptime('15:30', '%H:%M').time()
+            df = df[(t >= market_open) & (t <= market_close)].copy()
+
+            return df[['datetime', 'open', 'high', 'low', 'close']]
+
+        except Exception as e:
+            print(f"[Breeze/{timeframe}] Session fetch error {from_str}: {e}")
             return pd.DataFrame()
-        return self._clean_tv_df(raw)
+
+    # ── Breeze fallback fetch (multi-day loop) ────────────────────────────────
+
+    def _fetch_breeze(self, n_bars, timeframe='1m'):
+        """
+        Fetch n_bars candles from Breeze get_historical_data (v1).
+
+        Strategy — mirrors the original IndexHistoricalData logic:
+          1. Fetch today's session first.
+          2. If still short of n_bars, walk back one business day at a time
+             (up to 10 calendar days) fetching each prior session and prepending.
+          3. Trim to the last n_bars and return.
+
+        This handles Breeze's per-call session limit cleanly without relying on
+        a single large date-window that may be truncated silently.
+
+        BankNifty: stock_code="CNXBAN", exchange_code="NSE", product_type="cash"
+        No expiry / right / strike_price required.
+        """
+        try:
+            breeze   = self._get_breeze()
+            interval = BREEZE_INTERVAL[timeframe]
+            fmt      = '%Y-%m-%d %H:%M:%S'
+
+            now_ist     = datetime.now(IST)
+            today       = now_ist.date()
+            session_end = now_ist.replace(hour=MARKET_CLOSE_H, minute=MARKET_CLOSE_M,
+                                          second=0, microsecond=0)
+            session_open_t = datetime.strptime('09:15', '%H:%M').time()
+
+            combined = pd.DataFrame()
+
+            # ── Step 1: today's session up to now ────────────────────────────
+            today_start = datetime.combine(today,
+                          datetime.strptime('09:15', '%H:%M').time()).replace(tzinfo=IST)
+            from_str = today_start.strftime(fmt)
+            to_str   = session_end.strftime(fmt)
+            print(f"[Breeze/{timeframe}] Fetching today: {from_str} → {to_str}")
+            day_df = self._breeze_fetch_session(breeze, interval, from_str, to_str, timeframe)
+            if not day_df.empty:
+                combined = day_df
+
+            # ── Step 2: walk back day by day until n_bars satisfied ───────────
+            lookback_day  = today - timedelta(days=1)
+            cutoff        = today - timedelta(days=10)
+
+            while len(combined) < n_bars and lookback_day >= cutoff:
+                if not self.is_business_day(lookback_day):
+                    lookback_day -= timedelta(days=1)
+                    continue
+
+                d_start  = datetime.combine(lookback_day,
+                            datetime.strptime('09:15', '%H:%M').time()).replace(tzinfo=IST)
+                d_end    = datetime.combine(lookback_day,
+                            datetime.strptime('15:30', '%H:%M').time()).replace(tzinfo=IST)
+                from_str = d_start.strftime(fmt)
+                to_str   = d_end.strftime(fmt)
+
+                print(f"[Breeze/{timeframe}] Fetching prior session: {from_str} → {to_str}"
+                      f"  (have {len(combined)}/{n_bars} bars)")
+                day_df = self._breeze_fetch_session(breeze, interval, from_str, to_str, timeframe)
+
+                if not day_df.empty:
+                    combined = pd.concat([day_df, combined], ignore_index=True)
+
+                lookback_day -= timedelta(days=1)
+
+            if combined.empty:
+                print(f"[Breeze/{timeframe}] No data collected across all sessions.")
+                return pd.DataFrame()
+
+            if len(combined) < n_bars:
+                print(f"[Breeze/{timeframe}] Only {len(combined)} bars available "
+                      f"(needed {n_bars}) — proceeding with what we have.")
+
+            # ── Finalise ─────────────────────────────────────────────────────
+            combined.sort_values('datetime', inplace=True)
+            combined.drop_duplicates(subset='datetime', keep='last', inplace=True)
+            combined.reset_index(drop=True, inplace=True)
+
+            combined['ohlc4'] = ((combined['open'] + combined['high'] +
+                                  combined['low']  + combined['close']) / 4).round(2)
+
+            # Trim to last n_bars
+            combined = combined.tail(n_bars).reset_index(drop=True)
+
+            print(f"[Breeze/{timeframe}] Returning {len(combined)} bars via fallback.")
+            return combined[['datetime', 'open', 'high', 'low', 'close', 'ohlc4']]
+
+        except Exception as e:
+            print(f"[Breeze/{timeframe}] Fallback error: {e}")
+            return pd.DataFrame()
+
+    # ── Primary TV fetch with fallback ────────────────────────────────────────
+
+    async def _fetch_with_fallback(self, timeframe, n_bars, tv_interval):
+        """
+        Try tv.get_hist() with a 30-second timeout.
+        On timeout, empty result, or any exception, fall back to Breeze API.
+        Returns a clean tz-naive IST DataFrame or empty DataFrame.
+        """
+        raw = None
+        try:
+            # Run the blocking TvDatafeed call in an executor with a timeout
+            loop = asyncio.get_event_loop()
+            raw  = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    lambda: self.tv.get_hist(
+                        symbol   = 'BANKNIFTY',
+                        exchange = 'NSE',
+                        interval = tv_interval,
+                        n_bars   = n_bars,
+                    )
+                ),
+                timeout=30.0,
+            )
+        except asyncio.TimeoutError:
+            print(f"[TV/{timeframe}] get_hist() timed out. Switching to Breeze fallback.")
+        except Exception as e:
+            print(f"[TV/{timeframe}] get_hist() error: {e}. Switching to Breeze fallback.")
+
+        if raw is not None and not raw.empty:
+            return self._clean_tv_df(raw)
+
+        # ── Breeze fallback ───────────────────────────────────────────────────
+        print(f"[TV/{timeframe}] No data from TvDatafeed. Using Breeze fallback.")
+        loop = asyncio.get_event_loop()
+        df   = await loop.run_in_executor(
+            None,
+            lambda: self._fetch_breeze(n_bars, timeframe),
+        )
+        return df
+
+    # ── Per-timeframe fetch entry points ─────────────────────────────────────
+
+    async def fetch_tv_data_1m(self, pool):
+        n_bars = await self.check_missing_or_duplicate_keys(pool, '1m') + 750
+        df     = await self._fetch_with_fallback('1m', n_bars, Interval.in_1_minute)
+        if df.empty:
+            print("[1m] No data from TV or Breeze.")
+        return df
 
     async def fetch_tv_data_5m(self, pool):
-        num_issues = await self.check_missing_or_duplicate_keys(pool, '5m')
-        raw = self.tv.get_hist(
-            symbol='BANKNIFTY', exchange='NSE',
-            interval=Interval.in_5_minute,
-            n_bars=num_issues + 75,
-        )
-        if raw is None or raw.empty:
-            print("[5m] TvDatafeed returned no data.")
-            return pd.DataFrame()
-        df = self._clean_tv_df(raw)
+        n_bars = await self.check_missing_or_duplicate_keys(pool, '5m') + 75
+        df     = await self._fetch_with_fallback('5m', n_bars, Interval.in_5_minute)
+        if df.empty:
+            print("[5m] No data from TV or Breeze.")
+            return df
         df['hlc3'] = ((df['high'] + df['low'] + df['close']) / 3).round(2)
         return df[['datetime', 'open', 'high', 'low', 'close', 'ohlc4', 'hlc3']]
 
@@ -4156,7 +5064,7 @@ class TvDataUpdate:
     async def insert_tick_dataframe(self, pool, df, table):
         if df.empty:
             return
-        cols        = df.columns.tolist()
+        cols         = df.columns.tolist()
         placeholders = ', '.join(['%s'] * len(cols))
         col_names    = ', '.join(f'`{c}`' for c in cols)
         sql          = f'REPLACE INTO `{table}` ({col_names}) VALUES ({placeholders})'
@@ -4175,9 +5083,9 @@ class TvDataUpdate:
 
     def is_market_open(self):
         now = pd.Timestamp.now(tz='Asia/Kolkata')
-        return (now.replace(hour=9,  minute=15, second=0, microsecond=0)
+        return (now.replace(hour=MARKET_OPEN_H,  minute=MARKET_OPEN_M,  second=0, microsecond=0)
                 <= now <=
-                now.replace(hour=15, minute=30, second=0, microsecond=0))
+                now.replace(hour=MARKET_CLOSE_H, minute=MARKET_CLOSE_M, second=0, microsecond=0))
 
     def is_business_day(self, date):
         return (date.weekday() < 5 and
@@ -4193,13 +5101,15 @@ class TvDataUpdate:
             print("Not a trading day. Exiting.")
             return
 
-        market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
+        market_close = now.replace(hour=MARKET_CLOSE_H, minute=MARKET_CLOSE_M,
+                                   second=0, microsecond=0)
         if now > market_close:
             print(f"Market already closed ({now.strftime('%H:%M:%S')} IST). Exiting.")
             return
 
         # Wait if started before market open
-        market_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
+        market_open = now.replace(hour=MARKET_OPEN_H, minute=MARKET_OPEN_M,
+                                  second=0, microsecond=0)
         if now < market_open:
             wait_secs = (market_open - now).total_seconds()
             print(f"Market opens in {wait_secs:.0f}s. Waiting...")

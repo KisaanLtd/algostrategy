@@ -103,6 +103,14 @@ gcloud run jobs replace cloud-run-job-tvdata.yaml --region=$REGION
 echo "  Deploying algostrategy-indicators job..."
 gcloud run jobs replace cloud-run-job-indicators.yaml --region=$REGION
 
+# Job 3: Row-count sync check  (run_sync_check.sh)
+#   Compares COUNT(*) of ohlctick_1mdata vs indicators_data.
+#   If lag > 4 rows: triggers the appropriate remediation script on-demand.
+#     — indicators_data lags → indicatordata_all.py (truncate + full recalc)
+#     — ohlctick_1mdata lags → tvdata.py            (truncate + full re-fetch)
+echo "  Deploying algostrategy-sync-check job..."
+gcloud run jobs replace cloud-run-job-sync-check.yaml --region=$REGION
+
 # ── Cloud Scheduler triggers ──────────────────────────────────────────────────
 echo ""
 echo "==> Setting up Cloud Scheduler triggers"
@@ -133,18 +141,25 @@ _upsert_scheduler() {
 
 BASE_URI="https://run.googleapis.com/v2/projects/$PROJECT_ID/locations/$REGION/jobs"
 
-# tvdata job    → 09:14 IST = 03:44 UTC
+# tvdata job        → 09:14 IST = 03:44 UTC
 _upsert_scheduler \
   "algostrategy-tvdata-trigger" \
   "44 3 * * 1-5" \
   "$BASE_URI/algostrategy-tvdata:run"
 
-# indicators job → 09:19 IST = 03:49 UTC
+# indicators job    → 09:19 IST = 03:49 UTC
 # 5-min gap gives tvdata Step 1 (bulk fetch) time to complete first
 _upsert_scheduler \
   "algostrategy-indicators-trigger" \
   "49 3 * * 1-5" \
   "$BASE_URI/algostrategy-indicators:run"
+
+# sync-check job    → every 5 min, Mon–Fri, 09:14–15:35 IST = 03:44–10:05 UTC
+# Exits immediately when counts are within tolerance (lag ≤ 4); negligible cost.
+_upsert_scheduler \
+  "algostrategy-sync-check-trigger" \
+  "*/5 3-10 * * 1-5" \
+  "$BASE_URI/algostrategy-sync-check:run"
 
 # ── Cleanup note ──────────────────────────────────────────────────────────────
 echo ""
@@ -153,17 +168,22 @@ echo ""
 echo "   Web service  : https://algostrategy-web-xxxx-$REGION.run.app"
 echo ""
 echo "   Jobs and schedules:"
-echo "   ┌─────────────────────────────┬────────────┬─────────────────────────────────────────┐"
-echo "   │ Job                         │ IST Start  │ Script                                  │"
-echo "   ├─────────────────────────────┼────────────┼─────────────────────────────────────────┤"
-echo "   │ algostrategy-tvdata         │ 09:14      │ run_pipeline.sh                         │"
-echo "   │                             │            │   1. tvdata.py (truncate + bulk fetch)  │"
-echo "   │                             │            │   2. tvdata_update.py (live loop)       │"
-echo "   ├─────────────────────────────┼────────────┼─────────────────────────────────────────┤"
-echo "   │ algostrategy-indicators     │ 09:19      │ run_indicators.sh                       │"
-echo "   │                             │            │   1. indicatordata_all.py (truncate+calc│"
-echo "   │                             │            │   2. indicator_update.py (live loop)    │"
-echo "   └─────────────────────────────┴────────────┴─────────────────────────────────────────┘"
+echo "   ┌─────────────────────────────┬──────────────────┬─────────────────────────────────────────┐"
+echo "   │ Job                         │ IST Schedule     │ Script                                  │"
+echo "   ├─────────────────────────────┼──────────────────┼─────────────────────────────────────────┤"
+echo "   │ algostrategy-tvdata         │ 09:14            │ run_pipeline.sh                         │"
+echo "   │                             │                  │   1. tvdata.py (truncate + bulk fetch)  │"
+echo "   │                             │                  │   2. tvdata_update.py (live loop)       │"
+echo "   ├─────────────────────────────┼──────────────────┼─────────────────────────────────────────┤"
+echo "   │ algostrategy-indicators     │ 09:19            │ run_indicators.sh                       │"
+echo "   │                             │                  │   1. indicatordata_all.py (truncate+calc│"
+echo "   │                             │                  │   2. indicator_update.py (live loop)    │"
+echo "   ├─────────────────────────────┼──────────────────┼─────────────────────────────────────────┤"
+echo "   │ algostrategy-sync-check     │ every 5m         │ run_sync_check.sh                       │"
+echo "   │                             │ 09:14–15:35      │   row_count_sync_check.py               │"
+echo "   │                             │                  │   lag>4 → indicatordata_all.py OR       │"
+echo "   │                             │                  │           tvdata.py (on-demand)         │"
+echo "   └─────────────────────────────┴──────────────────┴─────────────────────────────────────────┘"
 echo ""
 echo "   If old job 'algostrategy-pipeline' still exists, delete it:"
 echo "   gcloud run jobs delete algostrategy-pipeline --region $REGION"

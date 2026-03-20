@@ -1,0 +1,84 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  cloud-run-job-sync-check.yaml  —  Row-count sync monitor
+#
+#  Runs run_sync_check.sh:
+#    → row_count_sync_check.py
+#        1. Fetch COUNT(*) for ohlctick_1mdata and indicators_data in parallel.
+#        2. If equal   → exit cleanly (no-op, fast).
+#        3. If indicators_data lags → run indicatordata_all.py (truncate + full recalc).
+#        4. If ohlctick_1mdata  lags → run tvdata.py (truncate + full OHLC re-fetch).
+#        5. Post-remediation re-check and log.
+#
+#  Schedule : Every 5 min, Mon–Fri, 09:14–15:35 IST
+#             = "*/5 3-10 * * 1-5" UTC  (covers 03:44–10:05 UTC = 09:14–15:35 IST)
+#
+#  Deploy   : gcloud run jobs replace cloud-run-job-sync-check.yaml --region asia-south1
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: run.googleapis.com/v1
+kind: Job
+metadata:
+  name: algostrategy-sync-check
+  annotations:
+    run.googleapis.com/launch-stage: GA
+spec:
+  template:
+    spec:
+      taskCount: 1
+      template:
+        spec:
+          # Normal run: count check exits in <5s.
+          # Worst case: full indicatordata_all.py recalc can take ~8 min.
+          # Full tvdata.py fetch can take ~5 min.
+          # Buffer: 1800s (30 min) is ample.
+          timeoutSeconds: 1800
+          # Idempotent — safe to retry once on non-zero exit.
+          maxRetries: 1
+          containers:
+            - image: gcr.io/algostratgy/algostrategy:latest
+              command: ["bash", "run_sync_check.sh"]
+              resources:
+                limits:
+                  cpu: "1"
+                  memory: "1Gi"
+              env:
+                - name: DB_HOST
+                  valueFrom:
+                    secretKeyRef:
+                      name: db-host
+                      key: latest
+                - name: DB_PORT
+                  valueFrom:
+                    secretKeyRef:
+                      name: db-port
+                      key: latest
+                - name: DB_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: db-user
+                      key: latest
+                - name: DB_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: db-password
+                      key: latest
+                - name: DB_NAME
+                  valueFrom:
+                    secretKeyRef:
+                      name: db-name
+                      key: latest
+                - name: API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: breeze-api-key
+                      key: latest
+                - name: API_SECRET
+                  valueFrom:
+                    secretKeyRef:
+                      name: breeze-api-secret
+                      key: latest
+                - name: SESSION_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: breeze-session-token
+                      key: latest
+          serviceAccountName: algostratgy-sa@algostratgy.iam.gserviceaccount.com

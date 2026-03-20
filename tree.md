@@ -2,7 +2,8 @@
 
 - 📁 algostrategy/
   - 📄 Dockerfile
-  - 📄 cloud-run-job.yaml
+  - 📄 cloud-run-job-indicators.yaml
+  - 📄 cloud-run-job-tvdata.yaml
   - 📄 deploy.sh
   - 📄 firebase.json
   - 📄 main.py
@@ -14,6 +15,7 @@
     - 📄 404.html
     - 📄 index.html
   - 📁 scripts/
+    - 📄 breeze_fetch_test.py
     - 📄 breeze_import.py
     - 📄 indicator_update.py
     - 📄 indicatordata_all.py
